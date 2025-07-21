@@ -1,4 +1,4 @@
-🧩 Form Tracking & Hashing Script (by Nathan O'Connor)
+🧩 Form Tracking & Hashing Script
 This script tracks HTML form submissions, hashes sensitive fields (e.g., email and phone), and pushes the data into the dataLayer for use with Google Tag Manager, Google Ads Enhanced Conversions, and GA4.
 
 📌 Features
@@ -94,6 +94,3 @@ For AJAX forms, a separate hook like nfFormSubmitResponse is needed (contact me 
 
 The script does not collect or send data without explicit form submission.
 
-🧑‍💻 Author
-Nathan O’Connor
-For custom implementations or help adapting this script for Ninja Forms, AJAX, or React-based forms, feel free to get in touch.
