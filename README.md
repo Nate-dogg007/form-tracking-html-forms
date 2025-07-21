@@ -1,96 +1,102 @@
-🧩 Form Tracking & Hashing Script
-This script tracks HTML form submissions, hashes sensitive fields (e.g., email and phone), and pushes the data into the dataLayer for use with Google Tag Manager, Google Ads Enhanced Conversions, and GA4.
 
-📌 Features
-🔒 Hashes email and phone fields using SHA-256 (privacy compliant).
+# 🧩 HTML Form Tracking & Hashing Script for Google Tag Manager
 
-🔎 Captures all input values from any HTML form.
+This script tracks **standard HTML form** submissions, hashes sensitive fields (like email and phone), and pushes a `form_submission_hashed` event into the `dataLayer`. It is ideal for use with **Google Tag Manager**, **Google Ads Enhanced Conversions**, and **Google Analytics 4** (GA4).
 
-🧼 Normalizes keys to lowercase with underscores (email_address, hashed_phone).
+---
 
-🧠 Supports forms that submit normally (non-AJAX).
+## 📌 Features
 
-📊 Pushes a form_submission_hashed event into the dataLayer.
+- 🔒 Hashes `email` and `phone` fields using **SHA-256**
+- 🧼 Normalizes field names to `lowercase_with_underscores`
+- 🔎 Captures all `input`, `textarea`, and `select` values on form submission
+- 📊 Pushes a `form_submission_hashed` event to `dataLayer`
+- 🚫 Skips fields like passwords or credit cards (defined in exclusion list)
+- 🧠 Works for both normal and JavaScript-triggered form submissions
 
-📂 Files
-form-tracking.js — The script to include in your site via GTM (or host on GitHub Pages/Cloudflare).
+---
 
-🚀 Installation Instructions
-✅ Step 1: Add the Script to GTM
-Open Google Tag Manager.
+## 📂 Files
 
-Go to Tags → Click New.
+- `form-tracking.js` — the script to add via GTM or self-host (e.g. GitHub Pages, Cloudflare)
 
-Name it something like Form Tracking Script.
+---
 
-Choose Tag Type: Custom HTML.
+## 🚀 Installation Instructions
 
-Paste the contents of form-tracking.js inside the HTML box.
+### ✅ Step 1: Add Script to Google Tag Manager
 
-Tick ✅ “Support document.write” if prompted.
+1. Go to your GTM container.
+2. Navigate to **Tags → New → Tag Configuration** → select **Custom HTML**.
+3. Paste in the contents of `form-tracking.js`.
+4. Tick ✅ “Support document.write” (if prompted).
+5. Set **Trigger** to **All Pages** (or restrict to form-specific pages).
+6. Save and **Publish**.
 
-Set the Trigger to All Pages (or limit to form-specific pages).
+---
 
-Save and Publish your container.
+### 🛠 Step 2: Create Data Layer Variables in GTM
 
-🛠 Step 2: Create Variables in GTM
-In Variables → User-Defined Variables, create Data Layer Variables:
+| GTM Variable Name     | Data Layer Variable Name         |
+|-----------------------|----------------------------------|
+| `form_name`           | `form_details.form_name`         |
+| `form_id`             | `form_details.form_id`           |
+| `contact_name`        | `form_data.contact_name`         |
+| `company_name`        | `form_data.company_name`         |
+| `hashed_email`        | `form_data.hashed_email`         |
+| `hashed_phone`        | `form_data.hashed_phone`         |
 
-Variable Name	Data Layer Variable Name
-form_name	form_details.form_name
-form_id	form_details.form_id
-contact_name (example)	form_data.contact_name
-company_name (example)	form_data.company_name
-hashed_email	form_data.hashed_email
-hashed_phone	form_data.hashed_phone
+🔍 Use **Preview Mode** in GTM to inspect the event and confirm variable names.
 
-🧠 Tip: Use GTM Preview Mode to inspect your form submission event and copy variable paths as needed.
+---
 
-📤 Step 3: Send to GA4 or Google Ads
-GA4 Event Tag
-Create a new GA4 Event Tag.
+### 📤 Step 3: Send to GA4 or Google Ads
 
-Use Event Name: form_submission_hashed
+#### ➤ GA4 Event Tag
 
-Add parameters such as:
+- Tag Type: **GA4 Event**
+- Event Name: `form_submission_hashed`
+- Parameters:
+  - `form_name`: `{{form_name}}`
+  - `form_id`: `{{form_id}}`
+  - `contact_name`: `{{contact_name}}`
 
-form_name: {{form_name}}
+#### ➤ Google Ads Enhanced Conversions
 
-form_id: {{form_id}}
+- In your **Google Ads Conversion Tag**:
+  - Enable **Enhanced Conversions**
+  - Toggle to use **dataLayer**
+  - Map:
+    - `Email` → `{{form_data.hashed_email}}`
+    - `Phone` → `{{form_data.hashed_phone}}`
 
-contact_name: {{contact_name}}
+---
 
-Google Ads Enhanced Conversions
-In your Google Ads Conversion Tag, enable Enhanced Conversions.
+## 🧪 Testing
 
-Toggle to use dataLayer.
+1. Use GTM **Preview Mode**
+2. Submit a form
+3. Check for `form_submission_hashed` in the debug panel
+4. Expand `form_details` and `form_data` to verify values
 
-Map fields like:
+---
 
-Email → {{form_data.hashed_email}}
+## 📋 Requirements
 
-Phone → {{form_data.hashed_phone}}
+- HTML forms must use native `<form>` element
+- All input fields should have `name` attributes
+- Works with non-AJAX (normal) forms or those that use `.submit()`
+- Browser must support `window.crypto.subtle` API (most modern browsers)
 
-🧪 Testing
-Use GTM Preview Mode.
+---
 
-Submit your form.
+## ⚠️ Notes
 
-Ensure form_submission_hashed appears in the debug panel.
+- Does **not** support AJAX-only forms (e.g. Ninja Forms) — use the Ninja version for those
+- Does **not** work with React/Vue or SPA frameworks by default
+- Script does not collect or send data without form submission
+- Ensure your cookie and consent policies are aligned with GDPR and other regulations
 
-Check values under form_details and form_data.
+---
 
-📋 Requirements
-Forms must use standard HTML <form> submission (not AJAX or JS-only).
-
-Browser must support crypto.subtle API (modern browsers only).
-
-Form inputs should have name attributes.
-
-⚠️ Notes
-This script does not track SPA frameworks (React/Vue/etc.) or Ninja Forms (AJAX) out-of-the-box.
-
-For AJAX forms, a separate hook like nfFormSubmitResponse is needed (contact me for that version).
-
-The script does not collect or send data without explicit form submission.
-
+**Author:** Nathan O’Connor
