@@ -1,34 +1,15 @@
-<script>
 /*
-  ░▒▓█ Form Tracking & Hashing Script █▓▒░
+============================================
+HTML Forms Tracking Script with Smart Hashing
+Author: Nathan O'Connor
+============================================
 
-  ─────────────────────────────────────────────────────────────
-  WHAT THIS SCRIPT DOES:
-
-  ✅ Listens for all HTML form submissions on the page.
-  ✅ Extracts and normalizes all input field names and values.
-  ✅ Hashes email and phone values using SHA-256 (for Enhanced Conversions).
-  ✅ Pushes a structured event ('form_submission_hashed') to the dataLayer.
-  ✅ Includes form name (via data-title or form.name) and form ID (via form.id).
-  ✅ All keys in `form_data` are lowercased and use underscores (no spaces).
-
-  ─────────────────────────────────────────────────────────────
-  HOW TO USE IN GOOGLE TAG MANAGER (GTM):
-
-  1. Add this entire script inside a "Custom HTML" tag in GTM.
-  2. Set the trigger to "All Pages" or specific pages where forms appear.
-  3. In GTM, create Data Layer Variables like:
-     - `form_details.form_name`
-     - `form_details.form_id`
-     - `form_data.hashed_email`
-     - `form_data.hashed_phone`
-     - `form_data.contact_name` (or other field names)
-  4. Use these variables in GA4 or Google Ads tags.
-  5. Make sure hashing matches Enhanced Conversion setup.
-
-  Note: This works best with plain HTML forms or Ninja Forms that use normal <form> submission.
-
-  ─────────────────────────────────────────────────────────────
+📌 What this script does:
+- Tracks standard HTML form submissions (including .submit()).
+- Hashes personal fields: email, phone, name, address, postcode, country.
+- Normalizes keys (lowercase, underscores only).
+- Pushes a 'form_submission_hashed' event to the dataLayer.
+- Intended for use with GTM, GA4, and Google Ads Enhanced Conversions.
 */
 
 (function () {
@@ -37,80 +18,75 @@
     return;
   }
 
-  // Hash a string using SHA-256
   function hashString(str) {
-    if (typeof str !== 'string' || str.length === 0) {
-      return Promise.resolve('');
-    }
+    if (typeof str !== 'string' || str.length === 0) return Promise.resolve('');
 
-    var encoder = new TextEncoder();
-    var data = encoder.encode(str);
+    const encoder = new TextEncoder();
+    const data = encoder.encode(str.trim().toLowerCase());
 
     return crypto.subtle.digest('SHA-256', data).then(function (buffer) {
-      var hashArray = Array.prototype.slice.call(new Uint8Array(buffer));
-      return hashArray.map(function (b) {
-        return ('00' + b.toString(16)).slice(-2);
-      }).join('');
+      const hashArray = Array.from(new Uint8Array(buffer));
+      return hashArray.map(b => ('00' + b.toString(16)).slice(-2)).join('');
     }).catch(function (err) {
       console.error('Hashing error:', err);
       return '';
     });
   }
 
-  // Normalize key names to lowercase with underscores
   function normalizeKey(str) {
     return str.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '_');
   }
 
+  function cleanPhone(str) {
+    return str.replace(/[^0-9+]/g, '');
+  }
+
   function handleFormSubmit(eventOrForm) {
-    var form = eventOrForm.target || eventOrForm;
-    var formData = {};
-    var fieldsToHash = ['email', 'phone'];
-    var fieldsToExclude = ['password', 'credit-card', 'cvc'];
-    var promises = [];
+    const form = eventOrForm.target || eventOrForm;
+    const formData = {};
+    const hashPromises = [];
 
-    for (var i = 0; i < form.elements.length; i++) {
-      var field = form.elements[i];
+    const hashRules = [
+      { match: /email/, clean: s => s.trim().toLowerCase(), key: 'hashed_email' },
+      { match: /phone|tel/, clean: cleanPhone, key: 'hashed_phone' },
+      { match: /name/, clean: s => s.trim().toLowerCase(), key: 'hashed_name' },
+      { match: /address/, clean: s => s.trim().toLowerCase(), key: 'hashed_address' },
+      { match: /zip|post/, clean: s => s.trim().toLowerCase(), key: 'hashed_postcode' },
+      { match: /country/, clean: s => s.trim().toLowerCase(), key: 'hashed_country' }
+    ];
 
-      if (
-        !field.name ||
-        field.tagName === 'BUTTON' ||
-        field.type === 'submit' ||
-        ((field.type === 'checkbox' || field.type === 'radio') && !field.checked)
-      ) {
-        continue;
-      }
+    for (let i = 0; i < form.elements.length; i++) {
+      const field = form.elements[i];
+      if (!field.name || field.tagName === 'BUTTON' || field.type === 'submit' || ((field.type === 'checkbox' || field.type === 'radio') && !field.checked)) continue;
 
-      var rawName = field.name;
-      var normKey = normalizeKey(rawName);
-      var fieldValue = field.value;
+      const rawName = field.name;
+      const normKey = normalizeKey(rawName);
+      const rawValue = field.value || '';
 
-      if (fieldsToExclude.indexOf(normKey) !== -1) continue;
+      let hashed = false;
 
-      var shouldHash = false;
-      for (var j = 0; j < fieldsToHash.length; j++) {
-        if (normKey.indexOf(fieldsToHash[j]) !== -1) {
-          shouldHash = true;
+      for (let rule of hashRules) {
+        if (rule.match.test(normKey)) {
+          const cleaned = rule.clean(rawValue);
+          hashPromises.push(
+            hashString(cleaned).then(function (hashedValue) {
+              formData[rule.key] = hashedValue;
+            })
+          );
+          hashed = true;
           break;
         }
       }
 
-      if (shouldHash) {
-        (function (key, value) {
-          var promise = hashString(value).then(function (hash) {
-            formData['hashed_' + key] = hash;
-          });
-          promises.push(promise);
-        })(normKey, fieldValue);
-      } else {
-        formData[normKey] = fieldValue;
+      if (!hashed) {
+        formData[normKey] = rawValue;
       }
     }
 
-    var formId = form.id || 'N/A';
-    var formName = form.getAttribute('data-title') || form.name || 'N/A';
+    const formId = form.id || 'N/A';
+    const formName = form.getAttribute('data-title') || form.name || 'N/A';
 
-    Promise.all(promises).then(function () {
+    Promise.all(hashPromises).then(function () {
       if (Object.keys(formData).length > 0) {
         window.dataLayer = window.dataLayer || [];
         window.dataLayer.push({
@@ -126,16 +102,13 @@
     });
   }
 
-  // Intercept native submit
-  var originalSubmit = HTMLFormElement.prototype.submit;
+  const originalSubmit = HTMLFormElement.prototype.submit;
   HTMLFormElement.prototype.submit = function () {
     handleFormSubmit(this);
     return originalSubmit.apply(this, arguments);
   };
 
-  // Listen for normal submit events
   document.addEventListener('submit', function (e) {
     handleFormSubmit(e);
   }, true);
 })();
-</script>
