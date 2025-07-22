@@ -31,7 +31,11 @@
 
 ### 🧠 Step 2: Set Up Data Layer Variables
 
-Create these in **Variables > User-Defined > Data Layer Variable**:
+Create these in **Variables in GTM**:
+
+1. In GTM → Variables → New → Variable Configuration → **Data Layer Variable**.
+2. click **Data Layer Variable**
+3. imput **Data Layer Variable Name** from the column below and repeat for each one
 
 | Variable Name      | Data Layer Variable Name        |
 |--------------------|----------------------------------|
@@ -59,7 +63,6 @@ Create these in **Variables > User-Defined > Data Layer Variable**:
 | Parameter         | Value                      |
 |-------------------|----------------------------|
 | `form_id`         | `{{form_id}}`              |
-| `contact_name`    | `{{contact_name}}`         |
 | `hashed_email`    | `{{hashed_email}}`         |
 | `hashed_phone`    | `{{hashed_phone}}`         |
 | `hashed_name`     | `{{hashed_name}}`          |
