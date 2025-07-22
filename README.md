@@ -27,6 +27,8 @@
 4. **Trigger:** Fire on "All Pages" or only on pages with your form.
 5. Save & Publish.
 
+> 💡 Use GTM **Preview Mode** submit a form, you should see "form_submission_hashed" event fire. Click on this event and go to datalayers you'll see the form names they might be a little different form the Data Layer Variables you are going to get up in step 2
+
 ---
 
 ### 🧠 Step 2: Set Up Data Layer Variables
