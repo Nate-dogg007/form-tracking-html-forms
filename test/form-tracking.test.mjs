@@ -21,6 +21,7 @@ const SOURCE = readFileSync(join(HERE, '..', 'html-forms'), 'utf8')
   .replace(/^\s*<script>/, '')
   .replace(/<\/script>\s*$/, '');
 
+const EVENT_NAME = 'html_form_submit';
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
 const script = (country) => {
@@ -307,7 +308,7 @@ async function run(path, installs = 1, act, opts = {}) {
   await (act || (async (p) => { await p.click('button[type=submit]'); }))(pg);
   await pg.waitForTimeout(opts.silentGtm ? 1800 : 400);
   const url = pg.url();
-  const submissions = records.filter((r) => r.event === 'form_submit');
+  const submissions = records.filter((r) => r.event === EVENT_NAME);
   await ctx.close();
   return { records, submissions, url };
 }
@@ -693,7 +694,7 @@ console.log('\npasswords and payment data');
   const blob = JSON.stringify(submissions);
   check('password value never reaches dataLayer', !blob.includes('hunter2'), blob);
   check('login form yields no user_data', !submissions[0]?.user_data);
-  check('base event still fires', submissions.length === 1 && submissions[0].event === 'form_submit');
+  check('base event still fires', submissions.length === 1 && submissions[0].event === EVENT_NAME);
   check('login form still submits', url.includes('/thanks'), url);
 }
 
