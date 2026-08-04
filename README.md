@@ -190,23 +190,53 @@ Consent for the Google Ads conversion tag itself is a separate matter, covered b
 
 ## GTM setup
 
-### 1. Data Layer Variables
+Seven steps, in this order. Step 1 first, because until it is done Google discards everything the
+rest of this sends and tells you nothing.
 
-You need three. Variables → New → Data Layer Variable.
+Names in backticks are what to type. Keep them exactly as written and the later steps will
+reference variables that already exist.
 
-| Variable name | Data Layer Variable Name |
+---
+
+### Step 1 — Turn on enhanced conversions in Google Ads
+
+Not in GTM. In Google Ads itself.
+
+1. **Goals → Conversions → Summary**, and click the conversion action you want to enhance.
+2. **Settings → Enhanced conversions.**
+3. Tick **Turn on enhanced conversions** and accept the terms.
+4. For the setup method choose **Google Tag Manager**.
+
+If you skip this, everything below will look correct in Preview and Google will silently throw
+the data away.
+
+---
+
+### Step 2 — Three Data Layer Variables
+
+**Variables → User-Defined Variables → New → Data Layer Variable.** Create all three.
+
+| Name it | Data Layer Variable Name |
 |---|---|
 | `DLV - user_data` | `user_data` |
 | `DLV - form_id` | `form_details.form_id` |
 | `DLV - form_name` | `form_details.form_name` |
 
-Set Data Layer Version to 2 so the nested object resolves.
+In each one, open **Additional Settings** and set **Data Layer Version** to **Version 2**. The
+values are nested objects and Version 1 will not reach into them.
 
-### 2. User-Provided Data variable
+---
 
-Variables → New → User-Provided Data, and choose **Code** rather than Manual configuration.
-Point it at `{{DLV - user_data}}`. If the picker will not take a Data Layer Variable directly,
-wrap it in a Custom JavaScript variable:
+### Step 3 — The User-Provided Data variable
+
+**Variables → New → Variable Configuration → User-Provided Data.**
+
+1. Under **Type**, choose **Code**, not Manual configuration.
+2. In **Variable**, select `{{DLV - user_data}}`.
+3. Name it `UPD - form user data`.
+
+If the picker refuses a Data Layer Variable, create a **Custom JavaScript** variable named
+`CJS - user data` containing the below, and point the User-Provided Data variable at that instead:
 
 ```js
 function () {
@@ -214,8 +244,8 @@ function () {
 }
 ```
 
-Code mode takes the whole object at once, which is why there is one variable here instead of
-the ten the old README asked for. The script already emits Google's expected shape:
+Code mode takes the whole object in one go, which is why this is one variable rather than the ten
+the old setup needed. The script already emits exactly the shape Google expects:
 
 ```js
 {
@@ -227,35 +257,79 @@ the ten the old README asked for. The script already emits Google's expected sha
     "sha256_street": "...",
     "city": "southampton",
     "region": "hampshire",
-    "postal_code": "so999xx",
+    "postal_code": "so99 9xx",
     "country": "GB"
   }
 }
 ```
 
-### 3. Google Ads conversion tag
+---
 
-- Tag type: Google Ads Conversion Tracking
-- Conversion ID and Label: from your Google Ads conversion action
-- Include user-provided data: select the User-Provided Data variable from step 2
-- Trigger: Custom Event = `html_form_submit`
-- Consent Settings: **Require additional consent** → `ad_storage`
+### Step 4 — The trigger
 
-This one tag covers both cases. When consent was denied, `{{DLV - user_data}}` is undefined and
-the conversion simply fires without enhanced data, which is what you want.
+**Triggers → New → Trigger Configuration → Custom Event.**
 
-The `ad_storage` requirement on this tag is not optional. The script's consent gate governs
-reading personal data out of the form; it has no say over the conversion tag, which writes `_gcl`
-cookies and needs consent in its own right under PECR.
+1. **Event name:** `html_form_submit`
+2. Choose **Some Custom Events**.
+3. Set the condition to `{{DLV - form_id}}` **equals** your enquiry form's id — or
+   `{{DLV - form_name}}` **contains** something like `contact`.
+4. Name it `CE - html_form_submit (leads)`.
 
-**Put a condition on the trigger.** The script listens to every form on the site, so a bare
-Custom Event trigger will count site search, login, newsletter signups and filter forms as
-conversions. Add a condition on `{{DLV - form_id}}` or `{{DLV - form_name}}` naming the forms
-that are genuinely leads. Relying on `data-no-track` across every other form means editing markup
-you may not control.
+**Do not use "All Custom Events" here.** The script listens to every form on the site, so a bare Custom Event trigger counts all of them. Site search, logins, newsletter signups and
+filter forms would all be counted as conversions. If you genuinely want every form, use All
+Custom Events knowingly rather than by default.
 
-Enhanced conversions also has to be switched on in Google Ads itself, under Goals →
-Conversions → Settings.
+Not sure what your form's id or name is? Do step 6 first with a temporary All Custom Events
+trigger, read the values off the event, then come back and add the condition.
+
+---
+
+### Step 5 — The Google Ads conversion tag
+
+**Tags → New → Tag Configuration → Google Ads Conversion Tracking.**
+
+1. **Conversion ID** and **Conversion Label** — from the conversion action in step 1.
+2. Tick **Include user-provided data from your website**, and select `UPD - form user data`.
+3. **Advanced Settings → Consent Settings → Require additional consent for tag to fire**, and add
+   `ad_storage`.
+4. **Triggering:** the trigger from step 4.
+5. Name it `Google Ads - Lead conversion` and save.
+
+The `ad_storage` requirement is not optional. The script's consent gate governs reading personal
+data out of a form; it has no say over this tag, which writes `_gcl` cookies and needs consent in
+its own right under PECR.
+
+One tag covers both consent states. When consent was denied, `{{DLV - user_data}}` is simply
+undefined and the conversion fires without enhanced data, which is what you want.
+
+---
+
+### Step 6 — Preview and check
+
+**Preview**, load the site, submit a test form.
+
+In the Tag Assistant window:
+
+1. Find `html_form_submit` in the event list on the left. Not there? The script is not running, or
+   something on the page is breaking before it. See "If no event fires" below.
+2. Click the event, then the **Variables** tab. `{{DLV - user_data}}` should hold an object with
+   `sha256_email_address` and an `address` block.
+3. Check the **Tags** tab shows `Google Ads - Lead conversion` fired.
+
+**If the event fires but `user_data` is empty**, consent is being read as denied. Open the browser
+console — the script logs one warning explaining exactly that. It fails closed, so no readable
+`ad_user_data` signal means no user data, deliberately.
+
+---
+
+### Step 7 — Publish, then confirm properly
+
+Submit the container.
+
+GTM Preview proves the event fires and the tag runs. It does **not** prove Google accepted or
+matched the data. For that, go back to **Goals → Conversions**, click the conversion action, and
+look at the **Enhanced conversions diagnostics** panel. It takes a day or two to populate and it
+is the only honest confirmation that any of this worked.
 
 ## Fields the script cannot guess
 
