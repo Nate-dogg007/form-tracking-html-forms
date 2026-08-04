@@ -463,14 +463,25 @@
     });
   }
 
-  function push(payload, onTagFired) {
-    window.dataLayer = window.dataLayer || [];
-    if (onTagFired) {
+  /*
+    Pushes, and resolves once GTM reports its tags have fired. Every push
+    goes through here: a conversion pixel that has not left the browser by
+    the time the page unloads is a lost conversion, and that applies just
+    as much to the consent-denied event as to the enriched one.
+  */
+  function pushAndWait(payload) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var done = function () { if (!settled) { settled = true; resolve(); } };
+
+      window.dataLayer = window.dataLayer || [];
       payload.eventTimeout = MAX_DELAY_MS;
-      payload.eventCallback = onTagFired;
-    }
-    window.dataLayer.push(payload);
-    log('pushed', payload.event, payload);
+      payload.eventCallback = done;
+
+      setTimeout(done, MAX_DELAY_MS);        // GTM absent or silent
+      window.dataLayer.push(payload);
+      log('pushed', payload.event, payload);
+    });
   }
 
   /* ── Handlers ───────────────────────────────────────────────────────
@@ -482,24 +493,17 @@
       var details = formDetails(form);
       var raw = readUserData(form);
 
-      if (!raw) {
-        push({ event: EVENT_NAME, form_details: details });
-        return null;                                // nothing to hash, don't hold
-      }
+      // No matchable fields, so there is nothing to hash, but the
+      // submission is still a conversion.
+      if (!raw) return pushAndWait({ event: EVENT_NAME, form_details: details });
 
       return buildUserData(raw).then(function (userData) {
-        return new Promise(function (resolve) {
-          var settled = false;
-          var done = function () { if (!settled) { settled = true; resolve(); } };
-          setTimeout(done, MAX_DELAY_MS);
-          var payload = { event: EVENT_NAME, form_details: details };
-          if (userData) payload.user_data = userData;
-          push(payload, done);
-        });
+        var payload = { event: EVENT_NAME, form_details: details };
+        if (userData) payload.user_data = userData;
+        return pushAndWait(payload);
       })['catch'](function (err) {
         log('user data failed, falling back to base event', err);
-        push({ event: EVENT_NAME, form_details: details });
-        return null;
+        return pushAndWait({ event: EVENT_NAME, form_details: details });
       });
     });
   } else {
@@ -508,8 +512,7 @@
       // event instead. Checked at submit time, so tag firing order in GTM
       // does not matter.
       if (STATE.upd) return null;
-      push({ event: EVENT_NAME, form_details: formDetails(form) });
-      return null;
+      return pushAndWait({ event: EVENT_NAME, form_details: formDetails(form) });
     });
   }
 

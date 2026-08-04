@@ -105,6 +105,13 @@ const PAGES = {
       <input name="email" value="prog@example.com">
     </form>`),
 
+  '/no-fields': page(`
+    <form id="nf" action="/thanks" method="get">
+      <input name="subject" value="General enquiry">
+      <textarea name="message">nothing matchable here</textarea>
+      <button type="submit">Send</button>
+    </form>`),
+
   '/phone': page(`
     <form id="p" action="/thanks" method="get">
       <input id="tel" name="phone" value="">
@@ -171,16 +178,20 @@ function check(name, condition, detail) {
   Loads a page with the given script variants installed, runs `act`,
   and returns every dataLayer push that happened.
 */
-async function run(path, variants, act) {
+async function run(path, variants, act, opts = {}) {
   const ctx = await browser.newContext();
   const pg = await ctx.newPage();
   const records = [];
   await pg.exposeFunction('__record', (o) => { records.push(o); });
-  await pg.addInitScript(DATALAYER_STUB);
+  // opts.silentGtm models a container that never invokes eventCallback, so
+  // the only thing releasing the submission is the MAX_DELAY_MS timeout.
+  await pg.addInitScript(
+    opts.silentGtm ? DATALAYER_STUB.replace('if (cb) setTimeout(cb, 10);', '') : DATALAYER_STUB
+  );
   for (const v of variants) await pg.addInitScript(variant(v));
   await pg.goto(`${BASE}${path}`);
   await (act || (async (p) => { await p.click('button[type=submit]'); }))(pg);
-  await pg.waitForTimeout(400);
+  await pg.waitForTimeout(opts.silentGtm ? 1800 : 400);
   const url = pg.url();
   await ctx.close();
   return { records, url };
@@ -240,6 +251,34 @@ console.log('\nuser-data variant — explicit address fields');
   check('city in the clear', addr.city === 'southampton', addr.city);
   check('region (county) in the clear', addr.region === 'hampshire', addr.region);
   check('alpha-2 country passed through uppercased', addr.country === 'GB');
+}
+
+console.log('\nwaiting for tags before navigating');
+{
+  // Both paths must hold the submission until GTM reports its tags fired,
+  // otherwise the conversion pixel races the unload. The consent-denied
+  // event needs this as much as the enriched one.
+  const base = await run('/contact', [false]);
+  check('base event asks GTM to call back', base.records[0]?.eventTimeout === 1200,
+    String(base.records[0]?.eventTimeout));
+
+  const upd = await run('/contact', [true]);
+  check('enriched event asks GTM to call back', upd.records[0]?.eventTimeout === 1200,
+    String(upd.records[0]?.eventTimeout));
+
+  const noFields = await run('/no-fields', [true]);
+  check('no-matchable-fields fallback asks GTM to call back',
+    noFields.records[0]?.eventTimeout === 1200, String(noFields.records[0]?.eventTimeout));
+}
+{
+  // A container that never calls eventCallback must not strand the form.
+  const { records, url } = await run('/contact', [false], null, { silentGtm: true });
+  check('silent GTM: event still pushed', records.length === 1, `got ${records.length}`);
+  check('silent GTM: form still submits on timeout', url.includes('/thanks'), url);
+}
+{
+  const { url } = await run('/contact', [true], null, { silentGtm: true });
+  check('silent GTM: user-data path still submits on timeout', url.includes('/thanks'), url);
 }
 
 console.log('\nphone → E.164 (DEFAULT_COUNTRY = GB)');

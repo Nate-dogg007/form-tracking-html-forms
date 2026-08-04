@@ -216,9 +216,9 @@ npm install playwright
 node test/form-tracking.test.mjs
 ```
 
-56 assertions. It caught a real bug during the 1.2 rewrite: `+44 (0)7700 900123` was hashing as
-`+4407700900123`, because the parenthesised trunk prefix survived. Run it after editing the
-script.
+62 assertions. It caught two real bugs during the 1.2 rewrite: `+44 (0)7700 900123` hashing as
+`+4407700900123` because the parenthesised trunk prefix survived, and the consent-denied event
+navigating away without waiting for its tag to fire. Run it after editing the script.
 
 ## Requirements and limits
 
@@ -227,8 +227,12 @@ script.
   the phone and postcode problems described above until they are updated.
 - HTTPS. `crypto.subtle` only exists in a secure context, so Tag B does nothing on plain HTTP.
 - Inputs need a `name` attribute or a `data-upd` attribute.
-- The script holds a submission for up to `MAX_DELAY_MS` (1200ms default) while hashing and tag
-  firing complete. It always submits, timeout or not.
+- The script holds every submission until GTM reports its tags have fired, capped at
+  `MAX_DELAY_MS` (1200ms default). This applies whether or not consent was granted: a conversion
+  pixel that has not left the browser before the page unloads is a lost conversion. The form
+  always submits, timeout or not.
+- Submissions are caught in the bubble phase so validation libraries get to cancel first. A form
+  handler that calls `stopPropagation()` will hide the submission from the script entirely.
 - `HTMLFormElement.prototype.submit` is patched once so programmatic submissions are caught.
   This defers the call slightly, which will matter if your code does something immediately
   after calling `submit()`.
