@@ -1,152 +1,333 @@
-# 📩 HTML Form Tracking & Hashing Script
+# HTML form tracking for Google Ads enhanced conversions
 
-> Author: **Nathan O'Connor**  
-> Version: 1.1  
-> Purpose: Track HTML form submissions and push normalized, hashed values to the `dataLayer` for GA4 and Google Ads Enhanced Conversions using User-Provided Data.
+Author: Nathan O'Connor
+Version: 1.2
 
----
+Captures native HTML form submissions, normalises and SHA-256 hashes the user-provided data
+fields Google Ads wants, and pushes one `form_submit` event to the dataLayer. Personal data is
+only ever read once your CMP has granted `ad_user_data`.
 
-## ✅ What This Script Does
+This feeds **Google Ads enhanced conversions only**. Do not put the hashed fields into GA4 event
+parameters or custom dimensions: that is what
+[Best practices to avoid sending PII](https://support.google.com/analytics/answer/6366371)
+prohibits, and hashing does not exempt you from it, because hashed data is pseudonymous rather
+than anonymous and remains personal data under UK GDPR
+([ICO](https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/data-sharing/anonymisation/pseudonymisation/)).
 
-- Listens for **native HTML form submissions** (non-AJAX).
-- Extracts all `<input>`, `<select>`, and `<textarea>` values.
-- **Hashes sensitive fields** (email, phone, name, address, etc.) using SHA-256.
-- Normalizes keys: lowercase + underscores.
-- Pushes a `form_submission_hashed` event into the `dataLayer`.
-- Enables support for Google Tag Manager, GA4, and Google Ads Enhanced Conversions.
+If you do want this data in GA4, there is a supported route:
+[user-provided data collection](https://support.google.com/analytics/answer/14077171), which is a
+separate opt-in feature with its own policy acknowledgement and an Ads link. This script does not
+target it. Use event parameters for that and you are breaking the rules; use the official feature
+and you are not.
 
----
+## If you are upgrading from 1.0 or 1.1
 
-## ⚙️ Installation in Google Tag Manager (GTM)
+1.2 is a rewrite, not a patch. You will need to redo the GTM setup. The short version of why:
 
-### 📄 Step 1: Add the Script to GTM
+- **Postcode and country were being hashed. They must be sent in the clear.** Google requires
+  first name, last name, postal code and country together for address matching, so hashing two
+  of the four did not weaken address matching, it broke it.
+- **Phone numbers were never converted to E.164.** `07700 900123` was hashed as typed, which
+  can never match a Google record. Enhanced conversions fails silently, so there was no signal
+  that anything was wrong.
+- **Any field with "name" in it was hashed**, including `company_name`, so the `contact_name`
+  and `company_name` variables the old README told you to create were always undefined.
+- **Unrecognised fields were pushed in plain text**, message boxes included. A password field
+  called anything other than exactly `password` went into the dataLayer as typed.
+- **The hash raced the page unload.** Native form submission navigates immediately, so the
+  event often never landed. It looked fine in Preview on a fast connection.
+- The event is now `form_submit`, not `form_submission_hashed`.
 
-1. In GTM, go to **Tags > New > Tag Configuration > Custom HTML**.
-2. Paste the script contents (`form-tracking.js`).
-3. Enable **"Support document.write"** if prompted.
-4. **Trigger:** Fire on "All Pages" or only on pages with your form.
-5. Save & Publish.
+## What it collects
 
-> 💡 Use GTM **Preview Mode** submit a form, you should see "form_submission_hashed" event fire. Click on this event and go to datalayers you'll see the form names they might be a little different form the Data Layer Variables you are going to get up in step 2
+An allowlist. Only these fields ever leave the page, and everything else is discarded: message
+boxes, free text, company names, anything unrecognised.
 
----
+| Field | Sent as | Hashed |
+|---|---|---|
+| Email | `sha256_email_address` | yes |
+| Phone | `sha256_phone_number` | yes |
+| First name | `address.sha256_first_name` | yes |
+| Last name | `address.sha256_last_name` | yes |
+| Street | `address.sha256_street` | yes |
+| City | `address.city` | no — explicit `data-upd` only |
+| Region / county / state | `address.region` | no — explicit `data-upd` only |
+| Postcode / zip | `address.postal_code` | no |
+| Country | `address.country` | no |
 
-### 🧠 Step 2: Set Up Data Layer Variables
+Google needs at least an email, a phone number, or a complete address (first name, last name,
+postal code and country). If none of those are present the `user_data` object is dropped and
+you get a bare `form_submit`.
 
-Create these in **Variables in GTM**:
+Field names are matched exactly against the allowlist, retried at each level as common prefixes
+are stripped. So `your-email`, `billing_email` and `email` all resolve to email, Elementor's
+`form_fields[email]` and Shopify's `address[zip]` resolve too, and `address_1` still resolves to
+street because it matches before `address` is treated as a prefix. `company_name` resolves to
+nothing and is dropped. A single `name` field is split on whitespace into first and last.
 
-1. In GTM → Variables → New → Variable Configuration → **Data Layer Variable**.
-2. click **Data Layer Variable**
-3. imput **Data Layer Variable Name** from the column below and repeat for each one
+Never collected, regardless of what it is called: anything of `type="password"`, anything with
+`autocomplete="cc-*"`, and anything that is not an `input`, `select` or `textarea`. Hidden fields
+are skipped too, because they are populated by the site rather than the visitor, and CRM forms
+routinely carry a hidden owner or assigned-rep email that would otherwise be hashed and reported
+as the person who submitted. Use `data-upd` to opt a hidden field in deliberately.
 
-| Variable Name      | Data Layer Variable Name        |
-|--------------------|----------------------------------|
-| `form_name`        | `form_details.form_name`        |
-| `form_id`          | `form_details.form_id`          |
-| `contact_name`     | `form_data.contact_name`        |
-| `company_name`     | `form_data.company_name`        |
-| `hashed_email`     | `form_data.hashed_email`        |
-| `hashed_phone`     | `form_data.hashed_phone`        |
-| `hashed_name`      | `form_data.hashed_name`         |
-| `hashed_address`   | `form_data.hashed_address`      |
-| `hashed_postcode`  | `form_data.hashed_zip`          |
-| `hashed_country`   | `form_data.hashed_country`      |
+By default, a form containing a password field has no fields read at all. It still produces a
+bare `form_submit` with the form id and name, so a login is counted as an event but never as
+identifiable data.
 
-> 💡 Use GTM **Preview Mode** to inspect actual field paths in your site’s dataLayer for additional fields.
+**`city` and `region` are never matched by field name.** They reach Google unhashed, and no
+name-based rule can separate "Hampshire" from "cancer" — a shape check that rejects a long
+sentence still lets "HIV positive" through, and a field called `state` is not always a US state
+("please state your requirements"). Google needs them only alongside a full address, which
+already requires first name, last name, postcode and country, so the match-rate cost is close to
+nil. Collect them with an explicit `data-upd="city"` / `data-upd="region"` if you want them.
 
----
+Also never matched: `form_name`, `form_title`, `field_name`, `user_name` and `username`. Several
+WordPress form plugins ship a `form_name` field holding the form's own title, which would
+otherwise be split and hashed as the visitor's name. That is worse than over-collecting, because
+it poisons the match data with something that is not a person.
 
-### 🧾 Step 3: GA4 Event Tag Setup
+## Install
 
-1. **Tag Type:** GA4 Event
-2. **Event Name:** `{{form_name}}`
-3. **Event Parameters:**
+The script goes into GTM twice, as two Custom HTML tags. One line differs between them.
 
-| Parameter         | Value                      |
-|-------------------|----------------------------|
-| `form_id`         | `{{form_id}}`              |
-| `hashed_email`    | `{{hashed_email}}`         |
-| `hashed_phone`    | `{{hashed_phone}}`         |
-| `hashed_name`     | `{{hashed_name}}`          |
+### Tag A: form tracking (base)
 
-4. **Trigger:** Fire on Custom Event = `form_submission_hashed`
+```js
+var COLLECT_USER_DATA = false;
+```
 
----
+- Trigger: All Pages
+- Consent Settings: no additional consent required
 
-### 🔁 Step 4: Google Ads — User-Provided Data (UPD)
+Pushes `form_submit` with the form id and form name. No field values, and deliberately no page
+path: GTM already exposes `{{Page Path}}`, and on a site that puts identifiers in the URL
+(`/account/<email>/reset`) copying it here would push personal data through the tag that carries
+no consent requirement.
 
-#### A) Create User-Provided Data Variable (Optional, but recommended)
-1. In GTM → Variables → New → Variable Configuration → **User-Provided Data**.
-2. Click **"Add User-Provided Data"**
-3. Map the following:
+### Tag B: form tracking (user-provided data)
 
-| Field           | Variable             |
-|----------------|----------------------|
-| Email           | `{{hashed_email}}`   |
-| Phone Number    | `{{hashed_phone}}`   |
-| Name            | `{{hashed_name}}`    |
-| Address         | `{{hashed_address}}` |
-| Zip             | `{{hashed_postcode}}`|
-| Country         | `{{hashed_country}}` |
+```js
+var COLLECT_USER_DATA = true;
+```
 
----
+- Trigger: All Pages
+- Consent Settings: **Require additional consent for tag to fire** → `ad_user_data`, `ad_storage`
 
-#### B) Create Google Ads Event Tag
+Pushes `form_submit` with the `user_data` object attached.
 
-1. **Tag Type:** Google Ads → User-Provided Data Event
-2. Select your Conversion ID.
-3. Link the **User-Provided Data Variable** you created above.
-4. **Trigger:** Custom Event = `form_submission_hashed`
+Exactly one `form_submit` fires per submission. When Tag B is running it emits the enriched
+event and Tag A stays silent, so there is nothing to de-duplicate: one trigger, one Google Ads
+tag.
 
----
+### Check this one setting
 
-## 🧪 Testing
+```js
+var DEFAULT_COUNTRY = 'GB';
+```
 
-1. Open **GTM Preview Mode**.
-2. Submit your form.
-3. Confirm the `form_submission_hashed` event appears.
-4. Expand the event and verify `form_data` and `form_details` contain expected values.
+This converts national phone formats to E.164. Get it wrong and every hashed phone number
+silently fails to match. Numbers already in international format (`+44...`, `0044...`) are used
+as they are, so this only matters for people typing `07700 900123`. Extend `DIAL_CODES` if your
+country is not listed.
 
----
+`COUNTRY_ALIASES` does the same job for country dropdowns that hold names rather than ISO
+codes. A country value that is neither two letters nor a listed alias is dropped rather than
+sent as a guess.
 
-## 🔐 Fields That Will Be Hashed
+## Consent
 
-The script automatically hashes fields if their name (or label) includes:
+The listener itself sets no cookies and sends nothing, so it belongs on all pages. Hashing
+someone's email and putting it in `window.dataLayer` is different: that is processing personal
+data for advertising, and once it is in the dataLayer any other tag or third-party script on
+the page can read it.
 
-| Field (Detected by name match) | Hashed? | Notes                          |
-|--------------------------------|---------|--------------------------------|
-| `email`                        | ✅      | Lowercased and trimmed         |
-| `phone`                        | ✅      | Digits only, stripped clean    |
-| `name`                         | ✅      | Used when there's no F/L split |
-| `first name` / `last name`     | ✅      | Lowercased and trimmed         |
-| `address`                      | ✅      | Lowercased and trimmed         |
-| `zip` / `postcode`             | ✅      | Lowercased and trimmed         |
-| `country`                      | ✅      | Lowercased and trimmed         |
+Tag-level consent checks in GTM do not help with that, because they gate the tag, not a push
+that has already happened. So the gate is on the payload, in two places.
 
----
+**Before consent.** GTM will not run Tag B until your CMP grants `ad_user_data`, the Consent Mode
+v2 signal for sending user-provided data to Google for advertising. Until then nothing personal
+is read, hashed or pushed. If consent is granted part way through a session GTM fires Tag B on
+the consent update, and a form submitted before that point produces the base event only.
 
-## 🔎 Requirements
+**After withdrawal.** GTM checks consent once, when it decides whether to run the tag. That is
+not enough on its own, because the listener Tag B installs lives for the rest of the page. So the
+script re-checks `ad_user_data` on every submission, reading the last consent `default` or
+`update` in the dataLayer, and falls back to the base payload when it has been withdrawn.
+Without that, someone who withdrew consent mid-session would carry on having their data read and
+hashed until they navigated away.
 
-- Form inputs must have `name` attributes.
-- Must use **standard HTML form submissions** (not SPA/AJAX).
-- Browser support for `crypto.subtle` (most modern browsers).
+**It fails closed.** A grant has to be positive and unambiguous. No consent signal, an
+unreadable shape, a dataLayer that has been reset, a `default` arriving after an `update`, a
+region-scoped entry for somewhere else: all of those resolve to denied, not granted. An earlier
+draft defaulted to granted on anything it could not read, which meant a CMP whose updates never
+reached the dataLayer in the expected shape looked exactly like consent. A control that fails
+open while its documentation says it fails closed is worse than no control at all.
 
----
+The practical consequence: **if you are not running Consent Mode v2, Tag B collects nothing.**
+It logs one console warning saying so, because silence here is indistinguishable from working.
+Set `REQUIRE_EXPLICIT_CONSENT = false` only if you have another lawful basis and know what it is.
 
-## ❗ Not Supported
+If your CMP does something the dataLayer does not reflect, set `window.formTrackingConsentFn` to
+a function returning `true` when user data may be collected. Anything else, including `undefined`,
+is denied, because the natural way to write a CMP adapter returns nothing on its deny branch. A
+function that throws is denied too.
 
-- AJAX-only or JavaScript-rendered forms (e.g., React, Vue, Ninja Forms, Gravity Forms).
-  - ✅ Use our alternate scripts for **Ninja Forms** or **Gravity Forms**.
-- Consent checks are not built-in (can be added manually via CMP/GTM logic).
+**Withdrawal is forward-only.** It stops further collection; it cannot retract what is already
+there. Anything pushed before withdrawal stays readable to other tags for the life of that page
+view, and only a page load clears it.
 
----
+Consent for the Google Ads conversion tag itself is a separate matter, covered below.
 
-## 📦 Repository Files
+## GTM setup
 
-- `form-tracking.js` – The main script
-- `README.md` – This file
+### 1. Data Layer Variables
 
----
+You need three. Variables → New → Data Layer Variable.
 
-Need help with Ninja Forms or Gravity Forms?
-👉 Contact: [info@nathanoconnor.co.uk](mailto:info@nathanoconnor.co.uk)
+| Variable name | Data Layer Variable Name |
+|---|---|
+| `DLV - user_data` | `user_data` |
+| `DLV - form_id` | `form_details.form_id` |
+| `DLV - form_name` | `form_details.form_name` |
+
+Set Data Layer Version to 2 so the nested object resolves.
+
+### 2. User-Provided Data variable
+
+Variables → New → User-Provided Data, and choose **Code** rather than Manual configuration.
+Point it at `{{DLV - user_data}}`. If the picker will not take a Data Layer Variable directly,
+wrap it in a Custom JavaScript variable:
+
+```js
+function () {
+  return {{DLV - user_data}};
+}
+```
+
+Code mode takes the whole object at once, which is why there is one variable here instead of
+the ten the old README asked for. The script already emits Google's expected shape:
+
+```js
+{
+  "sha256_email_address": "...",
+  "sha256_phone_number": "...",
+  "address": {
+    "sha256_first_name": "...",
+    "sha256_last_name": "...",
+    "sha256_street": "...",
+    "city": "southampton",
+    "region": "hampshire",
+    "postal_code": "so999xx",
+    "country": "GB"
+  }
+}
+```
+
+### 3. Google Ads conversion tag
+
+- Tag type: Google Ads Conversion Tracking
+- Conversion ID and Label: from your Google Ads conversion action
+- Include user-provided data: select the User-Provided Data variable from step 2
+- Trigger: Custom Event = `form_submit`
+- Consent Settings: **Require additional consent** → `ad_storage`
+
+One tag covers both cases. If Tag B never ran, `{{DLV - user_data}}` is undefined and the
+conversion fires without enhanced data, which is what you want.
+
+The `ad_storage` requirement on this tag is not optional. The script's consent gate governs
+reading personal data out of the form; it has no say over the conversion tag, which writes `_gcl`
+cookies and needs consent in its own right under PECR.
+
+**Put a condition on the trigger.** The script listens to every form on the site, so a bare
+Custom Event trigger will count site search, login, newsletter signups and filter forms as
+conversions. Add a condition on `{{DLV - form_id}}` or `{{DLV - form_name}}` naming the forms
+that are genuinely leads. Relying on `data-no-track` across every other form means editing markup
+you may not control.
+
+Enhanced conversions also has to be switched on in Google Ads itself, under Goals →
+Conversions → Settings.
+
+## Fields the script cannot guess
+
+Some form builders generate names nothing can match, WPForms `wpforms[fields][1]` being the
+usual offender. Add `data-upd` to the input:
+
+```html
+<input name="wpforms[fields][1]" data-upd="email">
+<input name="wpforms[fields][3]" data-upd="phone_number">
+```
+
+Accepted values: `email`, `phone_number`, `first_name`, `last_name`, `full_name`, `street`,
+`city`, `region`, `postal_code`, `country`, and `ignore` to exclude a field. `city` and `region`
+are only ever collected this way.
+
+It is also how you opt in a hidden field, which matters for the mirror pattern: where a visible
+input is decorative and the real value is written to a hidden one, as intl-tel-input and most
+styled selects and multi-step forms do. Without `data-upd` that value is skipped and you lose the
+field silently. Check whose data a hidden field holds before opting it in — the site chooses its
+value, not the visitor, so a hidden CRM owner field is not the person who filled the form.
+
+`data-upd` overrides everything, so it also works to correct a field the script has matched
+wrongly.
+
+## Opting out
+
+Add `data-no-track` to a form to skip it entirely, or to a single input to skip that field.
+
+```html
+<form id="internal-search" data-no-track>
+```
+
+Worth doing on internal search, login and anything handling payment.
+
+## Testing
+
+Open GTM Preview, submit a form, and look for `form_submit`. Check that `user_data` is present
+with your consent granted and absent with it denied. Set `var DEBUG = true;` in the script for
+console output while you are working.
+
+The repo has an end to end suite that runs the real script in Chromium against real forms,
+covering the normalisation rules, the consent split, password exclusion and E.164 conversion:
+
+```bash
+npm install playwright
+node test/form-tracking.test.mjs
+```
+
+110 assertions, 15 of which fail against the previous commit alone. Run it after editing the
+script. It has caught every real defect found in this rewrite so far, including the two most
+serious: the script overriding another handler's `preventDefault()` and force-submitting a form
+the site had cancelled, and personal data still being collected after consent was withdrawn.
+
+## Requirements and limits
+
+- Standard HTML form submissions. AJAX and JavaScript-rendered forms are not tracked: the script
+  sees the cancellation and stands down, so they keep working normally but produce no event. Use the
+  Ninja Forms or Gravity Forms scripts instead. Those are still on the older approach and carry
+  the phone and postcode problems described above until they are updated.
+- HTTPS. `crypto.subtle` only exists in a secure context, so Tag B does nothing on plain HTTP.
+- Inputs need a `name` attribute or a `data-upd` attribute.
+- The script holds every submission until GTM reports its tags have fired, capped at
+  `MAX_DELAY_MS` (1200ms default). This applies whether or not consent was granted: a conversion
+  pixel that has not left the browser before the page unloads is a lost conversion. The form
+  always submits, timeout or not.
+- Submissions are caught in the bubble phase on `window`, which runs after every `document`
+  listener whatever order they registered in. That is deliberate: anything cancelling the
+  submission must win, even a delegated handler added after the GTM container. The cost is that a
+  handler calling `stopPropagation()` hides the submission from the script entirely. Losing a
+  conversion beats breaking a form.
+- `DEFAULT_COUNTRY` also drives `KEEP_TRUNK_ZERO`, the short list of countries where the national
+  leading zero belongs in the E.164 number. Italy is on it: `06 1234 5678` is `+390612345678`,
+  not `+39612345678`. Check your market before trusting the list.
+- `HTMLFormElement.prototype.submit` is patched once so programmatic submissions are caught.
+  This defers the call slightly, which will matter if your code does something immediately
+  after calling `submit()`.
+
+## Files
+
+- `html-forms`: the script, paste into a GTM Custom HTML tag
+- `test/form-tracking.test.mjs`: the test suite
+
+Questions, or need the Ninja Forms or Gravity Forms version:
+[info@nathanoconnor.co.uk](mailto:info@nathanoconnor.co.uk)
