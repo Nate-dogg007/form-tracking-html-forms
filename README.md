@@ -126,6 +126,13 @@ affects people typing the local format. If your country is not in the `DIAL_CODE
 rather than codes (`GB`). A value that is neither two letters nor a listed alias is dropped
 rather than sent as a guess.
 
+### If you edit the script
+
+Never put `{{ ... }}` in it. GTM substitutes that syntax anywhere in a Custom HTML tag, including
+inside JavaScript comments, because it does not parse the JS. A `{{Page Path}}` in a comment
+shipped in v1.2 and GTM rejected the tag as referencing an unsupported variable. The test suite
+now fails on any occurrence.
+
 ### Optional hardening
 
 If you would rather the script were not on the page at all before consent, add

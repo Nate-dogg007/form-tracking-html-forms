@@ -312,6 +312,28 @@ async function run(path, installs = 1, act, opts = {}) {
   return { records, submissions, url };
 }
 
+/* ── Static checks (no browser needed) ────────────────────────────────── */
+
+console.log('\nGTM Custom HTML compatibility');
+{
+  // GTM substitutes {{ ... }} anywhere in a Custom HTML tag, including
+  // inside JavaScript comments — it does not parse the JS. A stray
+  // {{Page Path}} in a comment shipped in v1.2 and GTM rejected it as an
+  // unsupported variable when the built-in was not enabled.
+  const braces = SOURCE.match(/\{\{[^}]*\}\}/g) || [];
+  check('no GTM variable syntax anywhere in the script',
+    braces.length === 0, braces.join(', '));
+
+  // Custom HTML tags are pasted whole, so the wrapper has to be there.
+  const raw = readFileSync(join(HERE, '..', 'html-forms'), 'utf8');
+  check('file is wrapped in <script> tags for pasting',
+    /^\s*<script>/.test(raw) && /<\/script>\s*$/.test(raw));
+
+  // A </script> inside the body would close the tag early.
+  check('no stray closing script tag in the body',
+    !SOURCE.includes('</script>'));
+}
+
 /* ── Tests ───────────────────────────────────────────────────────────── */
 
 console.log('\nbase variant (no consent)');
