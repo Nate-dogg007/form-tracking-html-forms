@@ -4,7 +4,7 @@ Author: Nathan O'Connor
 Version: 1.2
 
 Captures native HTML form submissions, normalises and SHA-256 hashes the user-provided data
-fields Google Ads wants, and pushes one `form_submit` event to the dataLayer. Personal data is
+fields Google Ads wants, and pushes one `html_form_submit` event to the dataLayer. Personal data is
 only ever read once your CMP has granted `ad_user_data`, re-checked on every submission.
 
 **Install is one GTM Custom HTML tag.** Paste the file in, set one country code, trigger on All
@@ -39,7 +39,7 @@ and you are not.
   called anything other than exactly `password` went into the dataLayer as typed.
 - **The hash raced the page unload.** Native form submission navigates immediately, so the
   event often never landed. It looked fine in Preview on a fast connection.
-- The event is now `form_submit`, not `form_submission_hashed`.
+- The event is now `html_form_submit`, not `form_submission_hashed`.
 
 ## What it collects
 
@@ -60,7 +60,7 @@ boxes, free text, company names, anything unrecognised.
 
 Google needs at least an email, a phone number, or a complete address (first name, last name,
 postal code and country). If none of those are present the `user_data` object is dropped and
-you get a bare `form_submit`.
+you get a bare `html_form_submit`.
 
 Field names are matched exactly against the allowlist, retried at each level as common prefixes
 are stripped. So `your-email`, `billing_email` and `email` all resolve to email, Elementor's
@@ -75,7 +75,7 @@ routinely carry a hidden owner or assigned-rep email that would otherwise be has
 as the person who submitted. Use `data-upd` to opt a hidden field in deliberately.
 
 By default, a form containing a password field has no fields read at all. It still produces a
-bare `form_submit` with the form id and name, so a login is counted as an event but never as
+bare `html_form_submit` with the form id and name, so a login is counted as an event but never as
 identifiable data.
 
 **`city` and `region` are never matched by field name.** They reach Google unhashed, and no
@@ -162,7 +162,7 @@ decides whether to run the tag, and that decision does not get revisited. The li
 here lives for the rest of the page, so consent is re-read at the moment it matters: on every
 submission, before a single field is touched.
 
-Granted, and `form_submit` carries `user_data`. Denied, and `form_submit` fires with the form id
+Granted, and `html_form_submit` carries `user_data`. Denied, and `html_form_submit` fires with the form id
 and name only. Someone who withdraws consent halfway through a session stops being read from
 immediately, rather than at their next page load.
 
@@ -238,7 +238,7 @@ the ten the old README asked for. The script already emits Google's expected sha
 - Tag type: Google Ads Conversion Tracking
 - Conversion ID and Label: from your Google Ads conversion action
 - Include user-provided data: select the User-Provided Data variable from step 2
-- Trigger: Custom Event = `form_submit`
+- Trigger: Custom Event = `html_form_submit`
 - Consent Settings: **Require additional consent** → `ad_storage`
 
 This one tag covers both cases. When consent was denied, `{{DLV - user_data}}` is undefined and
@@ -292,7 +292,7 @@ Worth doing on internal search, login and anything handling payment.
 
 ## Testing
 
-Open GTM Preview, submit a form, and look for `form_submit`. Check that `user_data` is present
+Open GTM Preview, submit a form, and look for `html_form_submit`. Check that `user_data` is present
 with your consent granted and absent with it denied. Set `var DEBUG = true;` in the script for
 console output while you are working.
 

@@ -11,7 +11,7 @@
       message boxes, free text, unrecognised inputs — is discarded.
     • Normalises to Google's spec, SHA-256 hashes the fields Google wants
       hashed, and leaves city/region/postal_code/country in the clear.
-    • Pushes ONE `form_submit` event to the dataLayer, and holds the
+    • Pushes ONE `html_form_submit` event to the dataLayer, and holds the
       submission until the tag has fired.
 
   WHERE IT SENDS
@@ -29,8 +29,8 @@
   CONSENT
 
     Consent is checked here, on every submission, before a single field
-    is read. Granted -> `form_submit` carries `user_data`. Denied, or no
-    readable signal at all -> `form_submit` fires with the form id and
+    is read. Granted -> `html_form_submit` carries `user_data`. Denied, or no
+    readable signal at all -> `html_form_submit` fires with the form id and
     name only, and nothing personal is read, hashed or pushed.
 
     That covers withdrawal mid-session too, which a GTM tag-level check
@@ -71,9 +71,15 @@
   // Log to console. Leave false in production.
   var DEBUG = false;
 
+  // The dataLayer event name. Deliberately NOT `form_submit`: GA4's
+  // enhanced measurement collects an automatic event by that exact name,
+  // so sharing it makes reports and tag configuration ambiguous for no
+  // benefit. Change it here if you prefer a different namespace, and use
+  // the same value in your GTM trigger.
+  var EVENT_NAME = 'html_form_submit';
+
   /* ════════════════════════════════════════════════════════════════════ */
 
-  var EVENT_NAME = 'form_submit';
 
   // Dial codes for DEFAULT_COUNTRY. Numbers already in international format
   // (+44…, 0044…) are used as-is regardless of what is listed here.
