@@ -5,7 +5,10 @@ Version: 1.2
 
 Captures native HTML form submissions, normalises and SHA-256 hashes the user-provided data
 fields Google Ads wants, and pushes one `form_submit` event to the dataLayer. Personal data is
-only ever read once your CMP has granted `ad_user_data`.
+only ever read once your CMP has granted `ad_user_data`, re-checked on every submission.
+
+**Install is one GTM Custom HTML tag.** Paste the file in, set one country code, trigger on All
+Pages. Nothing to toggle.
 
 This feeds **Google Ads enhanced conversions only**. Do not put the hashed fields into GA4 event
 parameters or custom dimensions: that is what
@@ -89,109 +92,72 @@ it poisons the match data with something that is not a person.
 
 ## Install
 
-You paste the **whole `html-forms` file** into a GTM Custom HTML tag. Then you do it a second
-time into a second tag, and change one line. The two tags hold the same script; the only
-difference is one `false` becoming `true`.
+One GTM tag. Five minutes.
 
-The top of the file has a config block that looks like this:
+1. **Tags → New → Tag Configuration → Custom HTML.**
+2. Open the `html-forms` file in this repo, select **all of it**, and paste it into the HTML box.
+   Include the `<script>` and `</script>` lines at the top and bottom.
+3. Near the top you will see a short config block. Change one value:
 
-```js
-/* ══ CONFIG ══════════════════════════════════════════════════════════ */
+   ```js
+   var DEFAULT_COUNTRY = 'GB';
+   ```
 
-// false = Tag A (base) · true = Tag B (user-provided data)
-var COLLECT_USER_DATA = false;
+   Set it to the country most of this site's visitors are in. This is the only value you normally
+   need to touch, and it is the one that quietly ruins everything if it is wrong — see below.
+4. **Triggering → All Pages.**
+5. Name it something like `Form tracking` and **Save**.
 
-// ISO 3166-1 alpha-2 for your primary audience...
-var DEFAULT_COUNTRY = 'GB';
-...
-```
+That is the whole install. There is nothing to toggle, no second tag, and no consent setting to
+configure on this tag: the script checks consent itself, on every submission.
 
-That is the line you edit. Everything else stays as it is.
+### Why DEFAULT_COUNTRY matters
 
-### Tag A — "Form tracking (base)"
+It turns national phone formats into the E.164 format Google requires. `07700 900123` has to
+become `+447700900123` before it is hashed, and that conversion needs to know the country.
 
-1. Tags → New → Tag Configuration → **Custom HTML**.
-2. Open `html-forms`, copy **all of it** (including the `<script>` tags at the top and bottom),
-   and paste it into the HTML box.
-3. Leave `var COLLECT_USER_DATA = false;` exactly as it is.
-4. Set `var DEFAULT_COUNTRY` to the right country for this site. See below.
-5. Triggering → **All Pages**.
-6. Advanced Settings → Consent Settings → **No additional consent required**.
-7. Save.
+Get it wrong and every hashed phone number fails to match. Google reports no error for this. You
+will see the tag firing correctly in Preview and simply get a poor match rate forever.
 
-This tag pushes `form_submit` with the form id and form name, and nothing else. No field values,
-so there is nothing to gate. There is deliberately no page path either: GTM already exposes
-`{{Page Path}}`, and on a site that puts identifiers in the URL (`/account/<email>/reset`)
-copying it here would push personal data through the one tag that has no consent requirement.
+Numbers already written internationally (`+44…`, `0044…`) are used as they are, so this only
+affects people typing the local format. If your country is not in the `DIAL_CODES` list, add it.
 
-### Tag B — "Form tracking (user-provided data)"
+`COUNTRY_ALIASES` does the same job for country dropdowns holding names (`United Kingdom`)
+rather than codes (`GB`). A value that is neither two letters nor a listed alias is dropped
+rather than sent as a guess.
 
-1. Tags → New → Tag Configuration → **Custom HTML**.
-2. Paste **the same whole file again**.
-3. Change that one line to `var COLLECT_USER_DATA = true;`.
-4. Set `var DEFAULT_COUNTRY` to the same value you used in Tag A.
-5. Triggering → **All Pages**.
-6. Advanced Settings → Consent Settings → **Require additional consent for tag to fire**, and
-   add `ad_user_data` and `ad_storage`.
-7. Save.
+### Optional hardening
 
-This tag pushes `form_submit` with the `user_data` object attached.
+If you would rather the script were not on the page at all before consent, add
+**Consent Settings → Require additional consent for tag to fire → `ad_user_data`** to this tag.
+It still works the same way; GTM just holds the tag back until consent exists, and fires it on
+the consent update.
 
-### What happens then
-
-Both tags fire on every page, but only one `form_submit` event is produced per submission. When
-Tag B is present it emits the enriched event and Tag A stays silent, so you build **one** trigger
-and **one** Google Ads tag and there is nothing to de-duplicate.
-
-If your CMP has not granted `ad_user_data`, GTM never runs Tag B, so Tag A's plain event is what
-fires. Grant consent and Tag B takes over from that point on.
-
-### Why two tags rather than one
-
-So that the code which reads personal data out of a form is not even present on the page until
-consent exists. The script also re-checks consent on every submission (see below), so a single
-tag with `COLLECT_USER_DATA = true` and no GTM consent setting would behave correctly too. Two
-tags means two independent gates instead of one, and an earlier version of the runtime check was
-found to fail open in seven different ways during review — which is the argument for not making
-it the only thing standing between a visitor and their data. Use one tag if you would rather keep
-the container simple; use two if you want the belt and braces. The README assumes two.
-
-### Check this one setting
-
-```js
-var DEFAULT_COUNTRY = 'GB';
-```
-
-This converts national phone formats to E.164. Get it wrong and every hashed phone number
-silently fails to match, with no error anywhere. Numbers already in international format
-(`+44...`, `0044...`) are used as they are, so it only matters for people typing `07700 900123`.
-Extend `DIAL_CODES` if your country is not listed.
-
-`COUNTRY_ALIASES` does the same job for country dropdowns holding names rather than ISO codes. A
-country value that is neither two letters nor a listed alias is dropped rather than sent as a
-guess.
+This is genuinely optional. Without it the script is present but reads nothing, because the
+consent check runs before any field is touched.
 
 ## Consent
 
-The listener itself sets no cookies and sends nothing, so it belongs on all pages. Hashing
-someone's email and putting it in `window.dataLayer` is different: that is processing personal
-data for advertising, and once it is in the dataLayer any other tag or third-party script on
-the page can read it.
+**First, what this is not for.** Google Ads already refuses to transmit user-provided data when
+`ad_user_data` is denied — that is built into the tag, and you do not need this script to make it
+happen. The consent gate here is not protecting the transmission to Google.
 
-Tag-level consent checks in GTM do not help with that, because they gate the tag, not a push
-that has already happened. So the gate is on the payload, in two places.
+What it protects is `window.dataLayer`. Hashing someone's email and pushing it there discloses it
+to every other tag in the container and every third-party script on the page: session recorders,
+chat widgets, someone else's pixel. That happens before Google Ads gets a say, and Google's own
+consent handling does nothing about it. A GTM tag-level consent check does not help either,
+because it gates the tag rather than a push that has already happened.
 
-**Before consent.** GTM will not run Tag B until your CMP grants `ad_user_data`, the Consent Mode
-v2 signal for sending user-provided data to Google for advertising. Until then nothing personal
-is read, hashed or pushed. If consent is granted part way through a session GTM fires Tag B on
-the consent update, and a form submitted before that point produces the base event only.
+So the gate is on the payload, and it has two properties worth knowing.
 
-**After withdrawal.** GTM checks consent once, when it decides whether to run the tag. That is
-not enough on its own, because the listener Tag B installs lives for the rest of the page. So the
-script re-checks `ad_user_data` on every submission, reading the last consent `default` or
-`update` in the dataLayer, and falls back to the base payload when it has been withdrawn.
-Without that, someone who withdrew consent mid-session would carry on having their data read and
-hashed until they navigated away.
+**It is checked per submission, not once.** A GTM tag-level consent check happens when GTM
+decides whether to run the tag, and that decision does not get revisited. The listener installed
+here lives for the rest of the page, so consent is re-read at the moment it matters: on every
+submission, before a single field is touched.
+
+Granted, and `form_submit` carries `user_data`. Denied, and `form_submit` fires with the form id
+and name only. Someone who withdraws consent halfway through a session stops being read from
+immediately, rather than at their next page load.
 
 **It fails closed.** A grant has to be positive and unambiguous. No consent signal, an
 unreadable shape, a dataLayer that has been reset, a `default` arriving after an `update`, a
@@ -200,7 +166,7 @@ draft defaulted to granted on anything it could not read, which meant a CMP whos
 reached the dataLayer in the expected shape looked exactly like consent. A control that fails
 open while its documentation says it fails closed is worse than no control at all.
 
-The practical consequence: **if you are not running Consent Mode v2, Tag B collects nothing.**
+The practical consequence: **if you are not running Consent Mode v2, no user data is collected.**
 It logs one console warning saying so, because silence here is indistinguishable from working.
 Set `REQUIRE_EXPLICIT_CONSENT = false` only if you have another lawful basis and know what it is.
 
@@ -268,8 +234,8 @@ the ten the old README asked for. The script already emits Google's expected sha
 - Trigger: Custom Event = `form_submit`
 - Consent Settings: **Require additional consent** → `ad_storage`
 
-One tag covers both cases. If Tag B never ran, `{{DLV - user_data}}` is undefined and the
-conversion fires without enhanced data, which is what you want.
+This one tag covers both cases. When consent was denied, `{{DLV - user_data}}` is undefined and
+the conversion simply fires without enhanced data, which is what you want.
 
 The `ad_storage` requirement on this tag is not optional. The script's consent gate governs
 reading personal data out of the form; it has no say over the conversion tag, which writes `_gcl`
@@ -331,7 +297,7 @@ npm install playwright
 node test/form-tracking.test.mjs
 ```
 
-110 assertions, 15 of which fail against the previous commit alone. Run it after editing the
+108 assertions. Run it after editing the
 script. It has caught every real defect found in this rewrite so far, including the two most
 serious: the script overriding another handler's `preventDefault()` and force-submitting a form
 the site had cancelled, and personal data still being collected after consent was withdrawn.
@@ -342,7 +308,8 @@ the site had cancelled, and personal data still being collected after consent wa
   sees the cancellation and stands down, so they keep working normally but produce no event. Use the
   Ninja Forms or Gravity Forms scripts instead. Those are still on the older approach and carry
   the phone and postcode problems described above until they are updated.
-- HTTPS. `crypto.subtle` only exists in a secure context, so Tag B does nothing on plain HTTP.
+- HTTPS. `crypto.subtle` only exists in a secure context, so on plain HTTP the tag still reports
+  submissions but never attaches `user_data`.
 - Inputs need a `name` attribute or a `data-upd` attribute.
 - The script holds every submission until GTM reports its tags have fired, capped at
   `MAX_DELAY_MS` (1200ms default). This applies whether or not consent was granted: a conversion

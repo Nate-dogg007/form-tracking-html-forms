@@ -20,38 +20,35 @@
     Analytics is against Google's terms, hashed or not.
 
   ─────────────────────────────────────────────────────────────
-  DEPLOY AS TWO GTM CUSTOM HTML TAGS — same script, one line different.
+  HOW TO INSTALL
 
-    Tag A — "Form tracking (base)"
-      COLLECT_USER_DATA = false
-      Trigger:  All Pages
-      Consent:  No additional consent required
-      Result:   `form_submit` with form_details only. No personal data.
+    ONE GTM Custom HTML tag. Paste this whole file in, set
+    DEFAULT_COUNTRY below, trigger it on All Pages, save. That is it.
+    There is nothing to toggle and no second tag.
 
-    Tag B — "Form tracking (user-provided data)"
-      COLLECT_USER_DATA = true
-      Trigger:  All Pages
-      Consent:  Additional consent required → ad_user_data, ad_storage
-      Result:   `form_submit` with form_details AND user_data.
+  CONSENT
 
-  Exactly one `form_submit` fires per submission. When Tag B is present it
-  emits the enriched event and Tag A stays silent, so there is nothing to
-  de-duplicate in GTM — one trigger, one Google Ads tag.
+    Consent is checked here, on every submission, before a single field
+    is read. Granted -> `form_submit` carries `user_data`. Denied, or no
+    readable signal at all -> `form_submit` fires with the form id and
+    name only, and nothing personal is read, hashed or pushed.
 
-  Nothing personal is read, hashed or pushed unless Tag B is running, and
-  GTM will not run Tag B until your CMP grants ad_user_data. If consent is
-  granted mid-session GTM fires Tag B on the consent update; a form
-  submitted before that point produces the base event only. That is
-  correct behaviour, not a bug.
+    That covers withdrawal mid-session too, which a GTM tag-level check
+    cannot: the listener lives for the whole page, so consent has to be
+    re-read at the moment it matters.
+
+    Google Ads already refuses to transmit user-provided data when
+    ad_user_data is denied. This gate is not about that. It is about
+    keeping hashed personal data out of window.dataLayer, which every
+    other tag in the container and every third-party script on the page
+    can read regardless of what Google Ads decides.
+
 */
 
 (function () {
   'use strict';
 
   /* ══ CONFIG ══════════════════════════════════════════════════════════ */
-
-  // false = Tag A (base) · true = Tag B (user-provided data)
-  var COLLECT_USER_DATA = false;
 
   // ISO 3166-1 alpha-2 for your primary audience. Used to turn national
   // phone formats (07700 900123) into E.164 (+447700900123). Get this wrong
@@ -202,9 +199,8 @@
     try { console.log.apply(console, ['[form-tracking]'].concat([].slice.call(arguments))); } catch (e) {}
   }
 
-  /* ── Install guard ──────────────────────────────────────────────────
-     Two tags share one set of DOM hooks. Re-running the same variant is
-     a no-op, so a tag that fires twice cannot double-count.            */
+  /* ── Install guard ───────────────────────────────────────────────────
+     A tag that fires twice must not double-count.                      */
 
   // Shape-checked, because `window.__formTracking` is clobberable by any
   // element carrying id="__formTracking". Without this, an HTML injection
@@ -212,26 +208,24 @@
   var STATE = window.__formTracking;
   if (!STATE || typeof STATE !== 'object' || !(STATE.handlers instanceof Array)) {
     STATE = window.__formTracking = {
-      base: false, upd: false, hooked: false, handlers: [],
+      installed: false, hooked: false, handlers: [],
       resubmitting: false, inFlight: []
     };
   }
 
   if (!(STATE.inFlight instanceof Array)) STATE.inFlight = [];
 
-  if (COLLECT_USER_DATA ? STATE.upd : STATE.base) {
-    log('variant already installed, skipping');
+  if (STATE.installed) {
+    log('already installed, skipping');
     return;
   }
+  STATE.installed = true;
 
-  if (COLLECT_USER_DATA && !(window.crypto && window.crypto.subtle)) {
-    // SubtleCrypto needs a secure context. Without it we cannot hash, and
-    // sending unhashed personal data is not an option.
-    log('SubtleCrypto unavailable (needs HTTPS) — user data disabled');
-    return;
-  }
-
-  if (COLLECT_USER_DATA) { STATE.upd = true; } else { STATE.base = true; }
+  // SubtleCrypto needs a secure context. Without it nothing can be hashed,
+  // and sending personal data unhashed is not an option — so the tag still
+  // reports submissions, just never with user_data attached.
+  var CAN_HASH = !!(window.crypto && window.crypto.subtle);
+  if (!CAN_HASH) log('SubtleCrypto unavailable (needs HTTPS) — user data disabled');
 
   /* ── Runtime consent ────────────────────────────────────────────────
      GTM checks consent once, when it decides whether to run this tag.
@@ -679,42 +673,29 @@
      A handler returns a Promise when the submission must be held, or
      null when it has already done its work synchronously.              */
 
-  if (COLLECT_USER_DATA) {
-    STATE.handlers.push(function (form) {
-      var details = formDetails(form);
+  STATE.handlers.push(function (form) {
+    var details = formDetails(form);
 
-      // Re-checked per submission, not just at install. GTM gated this tag
-      // on the consent that existed when it ran; a visitor who withdrew
-      // consent since then must not have their data read at all.
-      if (!consentGranted()) {
-        log('ad_user_data withdrawn, falling back to base event');
-        return pushAndWait({ event: EVENT_NAME, form_details: details });
-      }
+    // Consent is read per submission, before any field is touched. GTM
+    // gates a tag once, when it decides to run it; the listener installed
+    // here outlives that decision, so withdrawal has to be caught at the
+    // moment of use.
+    if (!CAN_HASH || !consentGranted()) {
+      return pushAndWait({ event: EVENT_NAME, form_details: details });
+    }
 
-      var raw = readUserData(form);
+    var raw = readUserData(form);
+    if (!raw) return pushAndWait({ event: EVENT_NAME, form_details: details });
 
-      // No matchable fields, so there is nothing to hash, but the
-      // submission is still a conversion.
-      if (!raw) return pushAndWait({ event: EVENT_NAME, form_details: details });
-
-      return buildUserData(raw).then(function (userData) {
-        var payload = { event: EVENT_NAME, form_details: details };
-        if (userData) payload.user_data = userData;
-        return pushAndWait(payload);
-      })['catch'](function (err) {
-        log('user data failed, falling back to base event', err);
-        return pushAndWait({ event: EVENT_NAME, form_details: details });
-      });
+    return buildUserData(raw).then(function (userData) {
+      var payload = { event: EVENT_NAME, form_details: details };
+      if (userData) payload.user_data = userData;
+      return pushAndWait(payload);
+    })['catch'](function (err) {
+      log('user data failed, falling back to the plain event', err);
+      return pushAndWait({ event: EVENT_NAME, form_details: details });
     });
-  } else {
-    STATE.handlers.push(function (form) {
-      // When the user-data variant is installed it emits the enriched
-      // event instead. Checked at submit time, so tag firing order in GTM
-      // does not matter.
-      if (STATE.upd) return null;
-      return pushAndWait({ event: EVENT_NAME, form_details: formDetails(form) });
-    });
-  }
+  });
 
   /* ── DOM hooks (installed once, shared by both variants) ───────────── */
 
@@ -872,6 +853,6 @@
     };
   }
 
-  log('installed', COLLECT_USER_DATA ? '(user-provided data)' : '(base)');
+  log('installed');
 })();
 </script>
