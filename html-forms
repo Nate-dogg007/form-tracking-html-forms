@@ -61,6 +61,12 @@
   // Skip any form containing a password field (login / registration).
   var SKIP_PASSWORD_FORMS = true;
 
+  // When no ad_user_data signal can be found, treat that as denied rather
+  // than granted. Leave this on for UK/EU traffic. Turning it off means a
+  // site with no Consent Mode v2 will still collect, so only do that if
+  // you have another lawful basis and know what it is.
+  var REQUIRE_EXPLICIT_CONSENT = true;
+
   // Hard cap on how long a submission is held while hashing + tag firing
   // complete. The form always submits, timeout or not.
   var MAX_DELAY_MS = 1200;
@@ -133,12 +139,6 @@
       'address_1', 'address1', 'address_line_1', 'addressline1',
       'addr', 'addr1'
     ],
-    city: [
-      'city', 'town', 'locality', 'city_town', 'town_city'
-    ],
-    region: [
-      'region', 'state', 'county', 'province', 'state_region'
-    ],
     postal_code: [
       'postcode', 'post_code', 'postalcode', 'postal_code',
       'zip', 'zipcode', 'zip_code'
@@ -150,6 +150,29 @@
 
   // A single field holding a whole name. Split into first + last.
   var FULL_NAME = ['name', 'full_name', 'fullname', 'complete_name'];
+
+  /*
+    Accepted only through an explicit data-upd attribute, never matched by
+    field name. city and region reach Google unhashed, and no name-based
+    heuristic can separate "Hampshire" from "cancer" — a shape check that
+    rejects a long sentence still lets "HIV positive" through, and a field
+    called `state` is not always a US state. Google needs these only
+    alongside a full address, which already requires first name, last
+    name, postcode and country, so the match-rate cost is close to nil.
+  */
+  var EXPLICIT_ONLY = ['city', 'region'];
+
+  /*
+    Never matched, however they normalise. Several WordPress form plugins
+    ship a `form_name` field carrying the form's own title, which would
+    otherwise be split and hashed as the visitor's name — worse than
+    over-collecting, because it poisons the match data with something that
+    is not a person. A username is not a full name either.
+  */
+  var NEVER_MATCH = [
+    'form_name', 'field_name', 'user_name', 'username',
+    'form_id', 'field_id', 'form_title'
+  ];
 
   // Stripped from the front of a field name before matching, so
   // `your-email` and `billing_email` both resolve to `email`.
@@ -224,10 +247,25 @@
      ad_user_data is the current state. Override with
      window.formTrackingConsentFn if your CMP does something unusual.    */
 
+  var warnedNoConsentSignal = false;
+
+  /*
+    Returns true only on a positive, unambiguous grant. Every other
+    outcome — no signal, an unreadable shape, a dataLayer that has been
+    reset — resolves to denied when REQUIRE_EXPLICIT_CONSENT is on.
+
+    That direction matters. An earlier version defaulted to granted on
+    anything it could not read, which meant a CMP whose updates never
+    landed in the dataLayer in the expected shape looked exactly like
+    consent. A control that fails open while its documentation says it
+    fails closed is worse than no control.
+  */
   function consentGranted() {
     if (typeof window.formTrackingConsentFn === 'function') {
       try {
-        return window.formTrackingConsentFn() !== false;
+        // Strict equality on purpose: the natural way to write a CMP
+        // adapter returns undefined on its deny branch.
+        return window.formTrackingConsentFn() === true;
       } catch (err) {
         log('consent function threw, treating as denied', err);
         return false;
@@ -235,22 +273,46 @@
     }
 
     var dl = window.dataLayer;
-    // No dataLayer to read means GTM ran this tag on the consent it had,
-    // and nothing has changed since.
-    if (!dl || typeof dl.length !== 'number') return true;
+    var state = null;
+    var sawUpdate = false;
 
-    var granted = true;
-    for (var i = 0; i < dl.length; i++) {
-      var entry = dl[i];
-      if (!entry || entry[0] !== 'consent') continue;
-      if (entry[1] !== 'default' && entry[1] !== 'update') continue;
-      var settings = entry[2];
-      if (!settings || typeof settings !== 'object') continue;
-      if (typeof settings.ad_user_data === 'string') {
-        granted = settings.ad_user_data === 'granted';
+    if (dl && typeof dl.length === 'number') {
+      for (var i = 0; i < dl.length; i++) {
+        var entry = dl[i];
+        if (!entry || entry[0] !== 'consent') continue;
+        var command = entry[1];
+        if (command !== 'default' && command !== 'update') continue;
+        var settings = entry[2];
+        if (!settings || typeof settings !== 'object') continue;
+        // A region-scoped entry may not apply to this visitor, and we
+        // cannot tell from here which region they are in.
+        if (settings.region) continue;
+        // Consent Mode semantics: a default never overrides an update.
+        if (command === 'default' && sawUpdate) continue;
+        if (typeof settings.ad_user_data !== 'string') continue;
+        state = settings.ad_user_data === 'granted';
+        if (command === 'update') sawUpdate = true;
       }
     }
-    return granted;
+
+    if (state === null) {
+      if (!REQUIRE_EXPLICIT_CONSENT) return true;
+      if (!warnedNoConsentSignal && window.console && console.warn) {
+        warnedNoConsentSignal = true;
+        // Deliberately not behind DEBUG. Silence here looks identical to
+        // "enhanced conversions is working", which is the failure this
+        // whole script exists to stop.
+        try {
+          console.warn('[form-tracking] no ad_user_data consent signal found in ' +
+            'the dataLayer, so user-provided data was not collected. Configure ' +
+            'Consent Mode v2, set window.formTrackingConsentFn, or set ' +
+            'REQUIRE_EXPLICIT_CONSENT = false if you have another lawful basis.');
+        } catch (err) {}
+      }
+      return false;
+    }
+
+    return state;
   }
 
   /* ── Normalisation ──────────────────────────────────────────────────
@@ -282,6 +344,9 @@
     before `address` is treated as a prefix.
   */
   function matchKey(key) {
+    // Checked against the raw key, before any stripping: `form_name`
+    // would otherwise strip to `name` and be read as the visitor's.
+    if (NEVER_MATCH.indexOf(key) !== -1) return null;
     var parts = key.split('_');
     var guard = 0;
     while (guard <= 4) {
@@ -348,7 +413,11 @@
   }
 
   function normPostal(v) {
-    var s = String(v).trim().toLowerCase().replace(/\s+/g, '');
+    // Collapse internal whitespace rather than stripping it. Google
+    // normalises postal codes itself and its own worked example keeps the
+    // space (SO99 9XX), so there is nothing to gain from a lossier
+    // transform on the one address key UK matching leans on.
+    var s = String(v).trim().toLowerCase().replace(/\s+/g, ' ');
     if (!s || s.length > 12 || s.indexOf('@') !== -1) return '';
     return s;
   }
@@ -421,7 +490,7 @@
       var e = normKey(explicit);
       if (e === 'ignore') return null;
       if (e === 'full_name' || FULL_NAME.indexOf(e) !== -1) return 'full_name';
-      if (SYNONYMS.hasOwnProperty(e)) return e;
+      if (SYNONYMS.hasOwnProperty(e) || EXPLICIT_ONLY.indexOf(e) !== -1) return e;
       log('unknown data-upd value:', explicit);
       return null;
     }

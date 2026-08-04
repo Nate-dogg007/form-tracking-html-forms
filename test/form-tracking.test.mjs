@@ -136,6 +136,14 @@ const PAGES = {
 
   '/other': page('<h1>other</h1>'),
 
+  '/explicit-place': page(`
+    <form id="ep" action="/thanks" method="get">
+      <input name="email" value="ep@example.com">
+      <input name="town"     data-upd="city"   value="Southampton">
+      <input name="the_area" data-upd="region" value="Hampshire">
+      <button type="submit">Send</button>
+    </form>`),
+
   '/hidden': page(`
     <form id="hid" action="/thanks" method="get">
       <input type="hidden" name="email" value="salesrep@internal-crm.example">
@@ -167,6 +175,13 @@ const PAGES = {
       <input name="address[zip]"        value="SO99 9XX">
       <input name="address[province]"   value="Hampshire">
       <input name="address[address1]"   value="123 New Rd">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/form-name': page(`
+    <form id="fn" action="/thanks" method="get">
+      <input type="text" name="form_name" value="Contact Enquiry Form">
+      <input name="email" value="fn@example.com">
       <button type="submit">Send</button>
     </form>`),
 
@@ -276,6 +291,12 @@ async function run(path, variants, act, opts = {}) {
   await pg.addInitScript(
     opts.silentGtm ? DATALAYER_STUB.replace('if (cb) setTimeout(cb, 10);', '') : DATALAYER_STUB
   );
+  // The script fails closed, so every run needs an explicit grant unless
+  // the test is specifically probing what happens without one.
+  if (opts.consent !== 'none') {
+    await pg.addInitScript(`window.dataLayer.push(['consent','default',
+      { ad_user_data: 'granted', ad_storage: 'granted' }]);`);
+  }
   // injectAfterLoad models GTM running the tag on a consent update, after
   // the DOM already exists, rather than at document-start.
   if (!opts.injectAfterLoad) {
@@ -297,22 +318,22 @@ async function run(path, variants, act, opts = {}) {
 
 console.log('\nbase variant (no consent)');
 {
-  const { records, url } = await run('/contact', [false]);
-  check('pushes exactly one form_submit', records.length === 1, `got ${records.length}`);
-  check('carries form details', records[0]?.form_details?.form_name === 'Contact Us');
-  check('carries no user_data', !records[0]?.user_data);
+  const { submissions, url } = await run('/contact', [false]);
+  check('pushes exactly one form_submit', submissions.length === 1, `got ${submissions.length}`);
+  check('carries form details', submissions[0]?.form_details?.form_name === 'Contact Us');
+  check('carries no user_data', !submissions[0]?.user_data);
   check('no personal data anywhere in payload',
-    !/gmail|900123|jane|smith/i.test(JSON.stringify(records)));
+    !/gmail|900123|jane|smith/i.test(JSON.stringify(submissions)));
   check('form still submits', url.includes('/thanks'), url);
 }
 
 console.log('\nuser-data variant — normalisation');
 {
-  const { records, url } = await run('/contact', [true]);
-  const ud = records[0]?.user_data || {};
+  const { submissions, url } = await run('/contact', [true]);
+  const ud = submissions[0]?.user_data || {};
   const addr = ud.address || {};
 
-  check('pushes exactly one form_submit', records.length === 1, `got ${records.length}`);
+  check('pushes exactly one form_submit', submissions.length === 1, `got ${submissions.length}`);
   check('email: lowercased, gmail dots stripped',
     ud.sha256_email_address === sha256('janedoe@gmail.com'), ud.sha256_email_address);
   check('phone: national 07700 900123 → E.164 +447700900123',
@@ -320,22 +341,22 @@ console.log('\nuser-data variant — normalisation');
   check('full name split → first', addr.sha256_first_name === sha256('jane'));
   check('full name split → last (last token)', addr.sha256_last_name === sha256('smith'));
   check('postal_code sent in the CLEAR, spaces stripped',
-    addr.postal_code === 'so999xx', addr.postal_code);
+    addr.postal_code === 'so99 9xx', addr.postal_code);
   check('country name mapped to alpha-2, in the CLEAR',
     addr.country === 'GB', addr.country);
   check('postal_code is not hashed', !('sha256_postal_code' in addr));
   check('country is not hashed', !('sha256_country' in addr));
   check('company_name dropped entirely',
-    !JSON.stringify(records).toLowerCase().includes('acme'));
+    !JSON.stringify(submissions).toLowerCase().includes('acme'));
   check('free-text message dropped entirely',
-    !JSON.stringify(records).toLowerCase().includes('nhs'));
+    !JSON.stringify(submissions).toLowerCase().includes('nhs'));
   check('form still submits', url.includes('/thanks'), url);
 }
 
 console.log('\nuser-data variant — explicit address fields');
 {
-  const { records } = await run('/split-name', [true]);
-  const ud = records[0]?.user_data || {};
+  const { submissions } = await run('/split-name', [true]);
+  const ud = submissions[0]?.user_data || {};
   const addr = ud.address || {};
   check('first_name trimmed + lowercased', addr.sha256_first_name === sha256('john'));
   check('last_name hashed', addr.sha256_last_name === sha256('doe'));
@@ -344,8 +365,8 @@ console.log('\nuser-data variant — explicit address fields');
   check('phone +44 (0)7700 900456 → +447700900456',
     ud.sha256_phone_number === sha256('+447700900456'), ud.sha256_phone_number);
   check('street hashed', addr.sha256_street === sha256('123 new rd'));
-  check('city in the clear', addr.city === 'southampton', addr.city);
-  check('region (county) in the clear', addr.region === 'hampshire', addr.region);
+  check('city NOT matched by field name', !addr.city, addr.city);
+  check('region NOT matched by field name (county)', !addr.region, addr.region);
   check('alpha-2 country passed through uppercased', addr.country === 'GB');
 }
 
@@ -355,21 +376,21 @@ console.log('\nwaiting for tags before navigating');
   // otherwise the conversion pixel races the unload. The consent-denied
   // event needs this as much as the enriched one.
   const base = await run('/contact', [false]);
-  check('base event asks GTM to call back', base.records[0]?.eventTimeout === 1200,
-    String(base.records[0]?.eventTimeout));
+  check('base event asks GTM to call back', base.submissions[0]?.eventTimeout === 1200,
+    String(base.submissions[0]?.eventTimeout));
 
   const upd = await run('/contact', [true]);
-  check('enriched event asks GTM to call back', upd.records[0]?.eventTimeout === 1200,
-    String(upd.records[0]?.eventTimeout));
+  check('enriched event asks GTM to call back', upd.submissions[0]?.eventTimeout === 1200,
+    String(upd.submissions[0]?.eventTimeout));
 
   const noFields = await run('/no-fields', [true]);
   check('no-matchable-fields fallback asks GTM to call back',
-    noFields.records[0]?.eventTimeout === 1200, String(noFields.records[0]?.eventTimeout));
+    noFields.submissions[0]?.eventTimeout === 1200, String(noFields.submissions[0]?.eventTimeout));
 }
 {
   // A container that never calls eventCallback must not strand the form.
-  const { records, url } = await run('/contact', [false], null, { silentGtm: true });
-  check('silent GTM: event still pushed', records.length === 1, `got ${records.length}`);
+  const { submissions, url } = await run('/contact', [false], null, { silentGtm: true });
+  check('silent GTM: event still pushed', submissions.length === 1, `got ${submissions.length}`);
   check('silent GTM: form still submits on timeout', url.includes('/thanks'), url);
 }
 {
@@ -441,6 +462,72 @@ console.log('\nconsent withdrawn mid-session');
     !submissions[1]?.user_data, JSON.stringify(submissions[1]?.user_data));
 }
 
+console.log('\nconsent must fail closed, not open');
+{
+  // Every one of these leaked user_data before the fail-closed rewrite.
+  const cases = [
+    ['no consent signal at all',        () => {}],
+    ['CMP pushes a plain object',       () => { window.dataLayer.push(
+      { consent: 'update', ad_user_data: 'denied' }); }],
+    ['dataLayer replaced wholesale',    () => {
+      window.dataLayer.push(['consent', 'update', { ad_user_data: 'denied' }]);
+      const recordingPush = window.dataLayer.push;
+      window.dataLayer = [];
+      // Carry the recording hook across, or a leak into the fresh array
+      // goes unobserved and the probe passes without proving anything.
+      window.dataLayer.push = recordingPush; }],
+    ['dataLayer length reset',          () => {
+      window.dataLayer.push(['consent', 'update', { ad_user_data: 'denied' }]);
+      window.dataLayer.length = 0; }],
+    ['late default after an update',    () => {
+      window.dataLayer.push(['consent', 'update',  { ad_user_data: 'denied'  }]);
+      window.dataLayer.push(['consent', 'default', { ad_user_data: 'granted' }]); }],
+    ['consent fn returns undefined',    () => { window.formTrackingConsentFn = () => undefined; }],
+    ['consent fn returns 0',            () => { window.formTrackingConsentFn = () => 0; }]
+  ];
+  for (const [label, setup] of cases) {
+    const { submissions } = await run('/consent', [true], async (p) => {
+      await p.evaluate(`(${setup.toString()})()`);
+      await p.click('button[type=submit]');
+      await p.waitForTimeout(250);
+    }, { consent: 'none' });
+    check(`${label} → no user_data`, !submissions[0]?.user_data,
+      JSON.stringify(submissions[0]?.user_data));
+  }
+}
+{
+  // ...but a genuine grant must still work, or the whole feature is dark.
+  const { submissions } = await run('/consent', [true], async (p) => {
+    await p.evaluate(() => window.dataLayer.push(
+      ['consent', 'update', { ad_user_data: 'granted', ad_storage: 'granted' }]));
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('an explicit grant still collects', !!submissions[0]?.user_data);
+}
+{
+  // Both reviewers found this independently: a region-scoped default for
+  // somewhere else must not zero user_data for everyone.
+  const { submissions } = await run('/consent', [true], async (p) => {
+    await p.evaluate(() => {
+      window.dataLayer.push(['consent', 'default', { ad_user_data: 'granted' }]);
+      window.dataLayer.push(['consent', 'default', { ad_user_data: 'denied', region: ['ES'] }]);
+    });
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a region-scoped default elsewhere does not deny here',
+    !!submissions[0]?.user_data, JSON.stringify(submissions[0]));
+}
+{
+  const { submissions } = await run('/consent', [true], async (p) => {
+    await p.evaluate(() => { window.formTrackingConsentFn = () => true; });
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('consent fn returning true collects', !!submissions[0]?.user_data);
+}
+
 console.log('\nfields the site controls, not the visitor');
 {
   const { submissions } = await run('/hidden', [true]);
@@ -463,7 +550,7 @@ console.log('\nfields the site controls, not the visitor');
   const addr = submissions[0]?.user_data?.address || {};
   check('prose in a field named "state" is dropped, not sent in the clear',
     !addr.region, addr.region);
-  check('a real city still passes', addr.city === 'southampton', addr.city);
+  check('a real city is not name-matched either', !addr.city, addr.city);
 }
 {
   const { submissions } = await run('/contact', [true], null,
@@ -480,6 +567,24 @@ console.log('\nfields the site controls, not the visitor');
     JSON.stringify(submissions));
 }
 
+console.log('\nplace fields require an explicit opt-in');
+{
+  const { submissions } = await run('/explicit-place', [true]);
+  const addr = submissions[0]?.user_data?.address || {};
+  check('data-upd="city" collects', addr.city === 'southampton', addr.city);
+  check('data-upd="region" collects', addr.region === 'hampshire', addr.region);
+}
+{
+  // form_name carries the form's title on several WP plugins. Splitting it
+  // into first/last poisons the match data with something not a person.
+  const { submissions } = await run('/form-name', [true]);
+  const addr = submissions[0]?.user_data?.address || {};
+  check('form_name is never read as the visitor’s name',
+    !addr.sha256_first_name && !addr.sha256_last_name, JSON.stringify(addr));
+  check('the real name field still works', 
+    submissions[0]?.user_data?.sha256_email_address === sha256('fn@example.com'));
+}
+
 console.log('\nreal-world form builders');
 {
   const { submissions } = await run('/builders', [true]);
@@ -491,8 +596,8 @@ console.log('\nreal-world form builders');
     addr.sha256_first_name === sha256('elle') && addr.sha256_last_name === sha256('mentor'));
   check('HubSpot mobilephone',
     ud.sha256_phone_number === sha256('+447700900123'));
-  check('Shopify address[zip]', addr.postal_code === 'so999xx', addr.postal_code);
-  check('Shopify address[province]', addr.region === 'hampshire', addr.region);
+  check('Shopify address[zip]', addr.postal_code === 'so99 9xx', addr.postal_code);
+  check('Shopify address[province] not matched by name', !addr.region, addr.region);
   check('Shopify address[address1]', addr.sha256_street === sha256('123 new rd'));
 }
 {
@@ -535,11 +640,11 @@ for (const [input, expected, label] of [
 
 console.log('\nphone → E.164 (DEFAULT_COUNTRY = GB)');
 for (const [input, expected, label] of PHONE_CASES) {
-  const { records } = await run('/phone', [true], async (p) => {
+  const { submissions } = await run('/phone', [true], async (p) => {
     await p.fill('#tel', input);
     await p.click('button[type=submit]');
   });
-  const got = records[0]?.user_data?.sha256_phone_number;
+  const got = submissions[0]?.user_data?.sha256_phone_number;
   if (expected === null) {
     check(`${label}: "${input}" dropped`, !got, got);
   } else {
@@ -549,74 +654,74 @@ for (const [input, expected, label] of PHONE_CASES) {
 
 console.log('\nboth variants installed (consent granted)');
 {
-  const { records } = await run('/contact', [false, true]);
-  check('exactly ONE form_submit, not two', records.length === 1, `got ${records.length}`);
-  check('the surviving event is the enriched one', !!records[0]?.user_data);
+  const { submissions } = await run('/contact', [false, true]);
+  check('exactly ONE form_submit, not two', submissions.length === 1, `got ${submissions.length}`);
+  check('the surviving event is the enriched one', !!submissions[0]?.user_data);
 }
 {
-  const { records } = await run('/contact', [true, false]);
-  check('order-independent (user-data tag first)', records.length === 1, `got ${records.length}`);
-  check('still enriched', !!records[0]?.user_data);
+  const { submissions } = await run('/contact', [true, false]);
+  check('order-independent (user-data tag first)', submissions.length === 1, `got ${submissions.length}`);
+  check('still enriched', !!submissions[0]?.user_data);
 }
 
 console.log('\nre-firing the same tag');
 {
-  const { records } = await run('/contact', [true, true]);
-  check('double install does not double-count', records.length === 1, `got ${records.length}`);
+  const { submissions } = await run('/contact', [true, true]);
+  check('double install does not double-count', submissions.length === 1, `got ${submissions.length}`);
 }
 
 console.log('\npasswords and payment data');
 {
-  const { records, url } = await run('/login', [true]);
-  const blob = JSON.stringify(records);
+  const { submissions, url } = await run('/login', [true]);
+  const blob = JSON.stringify(submissions);
   check('password value never reaches dataLayer', !blob.includes('hunter2'), blob);
-  check('login form yields no user_data', !records[0]?.user_data);
-  check('base event still fires', records.length === 1 && records[0].event === 'form_submit');
+  check('login form yields no user_data', !submissions[0]?.user_data);
+  check('base event still fires', submissions.length === 1 && submissions[0].event === 'form_submit');
   check('login form still submits', url.includes('/thanks'), url);
 }
 
 console.log('\nDOM clobbering');
 {
-  const { records } = await run('/clobber', [true]);
+  const { submissions } = await run('/clobber', [true]);
   check('form_id read from attribute, not clobbered input',
-    records[0]?.form_details?.form_id === 'real-id', records[0]?.form_details?.form_id);
+    submissions[0]?.form_details?.form_id === 'real-id', submissions[0]?.form_details?.form_id);
   check('fields still read when form.elements is clobbered',
-    records[0]?.user_data?.sha256_email_address === sha256('clobber@example.com'));
+    submissions[0]?.user_data?.sha256_email_address === sha256('clobber@example.com'));
 }
 
 console.log('\ndata-upd mapping and opt-outs');
 {
-  const { records } = await run('/mapped', [true]);
+  const { submissions } = await run('/mapped', [true]);
   check('data-upd maps an unmatchable field name',
-    records[0]?.user_data?.sha256_email_address === sha256('mapped@example.com'));
+    submissions[0]?.user_data?.sha256_email_address === sha256('mapped@example.com'));
   check('data-upd="ignore" excludes the field',
-    !JSON.stringify(records).includes('secret'));
+    !JSON.stringify(submissions).includes('secret'));
   check('unrecognised free text dropped',
-    !JSON.stringify(records).includes('free text'));
+    !JSON.stringify(submissions).includes('free text'));
 }
 {
-  const { records, url } = await run('/no-track', [true]);
-  check('data-no-track form pushes nothing', records.length === 0, `got ${records.length}`);
+  const { submissions, url } = await run('/no-track', [true]);
+  check('data-no-track form pushes nothing', submissions.length === 0, `got ${submissions.length}`);
   check('data-no-track form still submits', url.includes('/thanks'), url);
 }
 
 console.log('\ncancelled submissions');
 {
-  const { records, url } = await run('/cancelled', [true]);
+  const { submissions, url } = await run('/cancelled', [true]);
   check('preventDefault by another handler = no conversion',
-    records.length === 0, JSON.stringify(records));
+    submissions.length === 0, JSON.stringify(submissions));
   check('page did not navigate', !url.includes('/thanks'), url);
 }
 
 console.log('\nprogrammatic form.submit()');
 {
-  const { records, url } = await run('/programmatic', [true], async (p) => {
+  const { submissions, url } = await run('/programmatic', [true], async (p) => {
     await p.evaluate(() => document.getElementById('prog').submit());
     await p.waitForURL('**/thanks', { timeout: 3000 }).catch(() => {});
   });
   check('hashes on programmatic submit',
-    records[0]?.user_data?.sha256_email_address === sha256('prog@example.com'),
-    JSON.stringify(records));
+    submissions[0]?.user_data?.sha256_email_address === sha256('prog@example.com'),
+    JSON.stringify(submissions));
   check('programmatic submit still navigates', url.includes('/thanks'), url);
 }
 

@@ -50,8 +50,8 @@ boxes, free text, company names, anything unrecognised.
 | First name | `address.sha256_first_name` | yes |
 | Last name | `address.sha256_last_name` | yes |
 | Street | `address.sha256_street` | yes |
-| City | `address.city` | no |
-| Region / county / state | `address.region` | no |
+| City | `address.city` | no — explicit `data-upd` only |
+| Region / county / state | `address.region` | no — explicit `data-upd` only |
 | Postcode / zip | `address.postal_code` | no |
 | Country | `address.country` | no |
 
@@ -59,9 +59,11 @@ Google needs at least an email, a phone number, or a complete address (first nam
 postal code and country). If none of those are present the `user_data` object is dropped and
 you get a bare `form_submit`.
 
-Field names are matched exactly after a common prefix is stripped, so `your-email`,
-`billing_email` and `email` all resolve to email. `company_name` does not resolve to anything
-and is dropped. A single `name` field is split on whitespace into first and last.
+Field names are matched exactly against the allowlist, retried at each level as common prefixes
+are stripped. So `your-email`, `billing_email` and `email` all resolve to email, Elementor's
+`form_fields[email]` and Shopify's `address[zip]` resolve too, and `address_1` still resolves to
+street because it matches before `address` is treated as a prefix. `company_name` resolves to
+nothing and is dropped. A single `name` field is split on whitespace into first and last.
 
 Never collected, regardless of what it is called: anything of `type="password"`, anything with
 `autocomplete="cc-*"`, and anything that is not an `input`, `select` or `textarea`. Hidden fields
@@ -73,9 +75,17 @@ By default, a form containing a password field has no fields read at all. It sti
 bare `form_submit` with the form id and name, so a login is counted as an event but never as
 identifiable data.
 
-`city` and `region` are the only free-text fields sent unhashed, so they are shape-checked before
-being passed through: anything over 60 characters, containing an `@`, running to more than four
-words or holding a long digit run is dropped. A field named `state` is not always a US state.
+**`city` and `region` are never matched by field name.** They reach Google unhashed, and no
+name-based rule can separate "Hampshire" from "cancer" — a shape check that rejects a long
+sentence still lets "HIV positive" through, and a field called `state` is not always a US state
+("please state your requirements"). Google needs them only alongside a full address, which
+already requires first name, last name, postcode and country, so the match-rate cost is close to
+nil. Collect them with an explicit `data-upd="city"` / `data-upd="region"` if you want them.
+
+Also never matched: `form_name`, `form_title`, `field_name`, `user_name` and `username`. Several
+WordPress form plugins ship a `form_name` field holding the form's own title, which would
+otherwise be split and hashed as the visitor's name. That is worse than over-collecting, because
+it poisons the match data with something that is not a person.
 
 ## Install
 
@@ -90,8 +100,10 @@ var COLLECT_USER_DATA = false;
 - Trigger: All Pages
 - Consent Settings: no additional consent required
 
-Pushes `form_submit` with the form id, form name and page path. No personal data, so there is
-nothing to gate.
+Pushes `form_submit` with the form id and form name. No field values, and deliberately no page
+path: GTM already exposes `{{Page Path}}`, and on a site that puts identifiers in the URL
+(`/account/<email>/reset`) copying it here would push personal data through the tag that carries
+no consent requirement.
 
 ### Tag B: form tracking (user-provided data)
 
@@ -145,9 +157,25 @@ script re-checks `ad_user_data` on every submission, reading the last consent `d
 Without that, someone who withdrew consent mid-session would carry on having their data read and
 hashed until they navigated away.
 
+**It fails closed.** A grant has to be positive and unambiguous. No consent signal, an
+unreadable shape, a dataLayer that has been reset, a `default` arriving after an `update`, a
+region-scoped entry for somewhere else: all of those resolve to denied, not granted. An earlier
+draft defaulted to granted on anything it could not read, which meant a CMP whose updates never
+reached the dataLayer in the expected shape looked exactly like consent. A control that fails
+open while its documentation says it fails closed is worse than no control at all.
+
+The practical consequence: **if you are not running Consent Mode v2, Tag B collects nothing.**
+It logs one console warning saying so, because silence here is indistinguishable from working.
+Set `REQUIRE_EXPLICIT_CONSENT = false` only if you have another lawful basis and know what it is.
+
 If your CMP does something the dataLayer does not reflect, set `window.formTrackingConsentFn` to
-a function returning `false` when user data must not be collected. It overrides the dataLayer
-check, and a function that throws is treated as denied.
+a function returning `true` when user data may be collected. Anything else, including `undefined`,
+is denied, because the natural way to write a CMP adapter returns nothing on its deny branch. A
+function that throws is denied too.
+
+**Withdrawal is forward-only.** It stops further collection; it cannot retract what is already
+there. Anything pushed before withdrawal stays readable to other tags for the life of that page
+view, and only a page load clears it.
 
 Consent for the Google Ads conversion tag itself is a separate matter, covered below.
 
@@ -231,7 +259,14 @@ usual offender. Add `data-upd` to the input:
 ```
 
 Accepted values: `email`, `phone_number`, `first_name`, `last_name`, `full_name`, `street`,
-`city`, `region`, `postal_code`, `country`, and `ignore` to exclude a field.
+`city`, `region`, `postal_code`, `country`, and `ignore` to exclude a field. `city` and `region`
+are only ever collected this way.
+
+It is also how you opt in a hidden field, which matters for the mirror pattern: where a visible
+input is decorative and the real value is written to a hidden one, as intl-tel-input and most
+styled selects and multi-step forms do. Without `data-upd` that value is skipped and you lose the
+field silently. Check whose data a hidden field holds before opting it in — the site chooses its
+value, not the visitor, so a hidden CRM owner field is not the person who filled the form.
 
 `data-upd` overrides everything, so it also works to correct a field the script has matched
 wrongly.
@@ -260,7 +295,7 @@ npm install playwright
 node test/form-tracking.test.mjs
 ```
 
-96 assertions, 23 of which fail against 1.1 and the first draft of 1.2. Run it after editing the
+110 assertions, 15 of which fail against the previous commit alone. Run it after editing the
 script. It has caught every real defect found in this rewrite so far, including the two most
 serious: the script overriding another handler's `preventDefault()` and force-submitting a form
 the site had cancelled, and personal data still being collected after consent was withdrawn.
