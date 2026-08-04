@@ -1,119 +1,602 @@
 <script>
 /*
-  ░▒▓█ Form Tracking & Hashing Script █▓▒░
-  Author: Nathan O'Connor
+  ░▒▓█ HTML Form Tracking → Google Ads Enhanced Conversions █▓▒░
+  Author:  Nathan O'Connor
+  Version: 1.2
 
   ─────────────────────────────────────────────────────────────
-  WHAT THIS SCRIPT DOES:
-  ✅ Tracks standard HTML form submissions (non-AJAX).
-  ✅ Extracts and normalizes all input field names and values.
-  ✅ Hashes personal fields (email, phone, name, address, etc.) using SHA-256.
-  ✅ Pushes a `form_submission_hashed` event to the dataLayer.
+  WHAT THIS DOES
+    • Captures native HTML form submissions (event + programmatic .submit()).
+    • Extracts ONLY Google's user-provided-data fields. Everything else —
+      message boxes, free text, unrecognised inputs — is discarded.
+    • Normalises to Google's spec, SHA-256 hashes the fields Google wants
+      hashed, and leaves city/region/postal_code/country in the clear.
+    • Pushes ONE `form_submit` event to the dataLayer, and holds the
+      submission until the tag has fired.
+
+  WHERE IT SENDS
+    Google Ads enhanced conversions (User-Provided Data) only.
+    Do NOT wire the user_data object into GA4 — sending personal data to
+    Analytics is against Google's terms, hashed or not.
+
+  ─────────────────────────────────────────────────────────────
+  DEPLOY AS TWO GTM CUSTOM HTML TAGS — same script, one line different.
+
+    Tag A — "Form tracking (base)"
+      COLLECT_USER_DATA = false
+      Trigger:  All Pages
+      Consent:  No additional consent required
+      Result:   `form_submit` with form_details only. No personal data.
+
+    Tag B — "Form tracking (user-provided data)"
+      COLLECT_USER_DATA = true
+      Trigger:  All Pages
+      Consent:  Additional consent required → ad_user_data, ad_storage
+      Result:   `form_submit` with form_details AND user_data.
+
+  Exactly one `form_submit` fires per submission. When Tag B is present it
+  emits the enriched event and Tag A stays silent, so there is nothing to
+  de-duplicate in GTM — one trigger, one Google Ads tag.
+
+  Nothing personal is read, hashed or pushed unless Tag B is running, and
+  GTM will not run Tag B until your CMP grants ad_user_data. If consent is
+  granted mid-session GTM fires Tag B on the consent update; a form
+  submitted before that point produces the base event only. That is
+  correct behaviour, not a bug.
 */
 
 (function () {
-  if (!window.crypto || !crypto.subtle) {
-    console.warn('SubtleCrypto not supported in this browser.');
+  'use strict';
+
+  /* ══ CONFIG ══════════════════════════════════════════════════════════ */
+
+  // false = Tag A (base) · true = Tag B (user-provided data)
+  var COLLECT_USER_DATA = false;
+
+  // ISO 3166-1 alpha-2 for your primary audience. Used to turn national
+  // phone formats (07700 900123) into E.164 (+447700900123). Get this wrong
+  // and every hashed phone silently fails to match.
+  var DEFAULT_COUNTRY = 'GB';
+
+  // Skip any form containing a password field (login / registration).
+  var SKIP_PASSWORD_FORMS = true;
+
+  // Hard cap on how long a submission is held while hashing + tag firing
+  // complete. The form always submits, timeout or not.
+  var MAX_DELAY_MS = 1200;
+
+  // Log to console. Leave false in production.
+  var DEBUG = false;
+
+  /* ════════════════════════════════════════════════════════════════════ */
+
+  var EVENT_NAME = 'form_submit';
+
+  // Dial codes for DEFAULT_COUNTRY. Numbers already in international format
+  // (+44…, 0044…) are used as-is regardless of what is listed here.
+  var DIAL_CODES = {
+    GB: '44',  US: '1',   CA: '1',   IE: '353', AU: '61',  NZ: '64',
+    ZA: '27',  IN: '91',  DE: '49',  FR: '33',  ES: '34',  IT: '39',
+    NL: '31',  BE: '32',  LU: '352', CH: '41',  AT: '43',  PT: '351',
+    SE: '46',  NO: '47',  DK: '45',  FI: '358', IS: '354', PL: '48',
+    CZ: '420', SK: '421', HU: '36',  RO: '40',  BG: '359', GR: '30',
+    HR: '385', SI: '386', EE: '372', LV: '371', LT: '370', CY: '357',
+    MT: '356', JP: '81',  CN: '86',  HK: '852', SG: '65',  MY: '60',
+    TH: '66',  PH: '63',  ID: '62',  KR: '82',  AE: '971', SA: '966',
+    IL: '972', TR: '90',  BR: '55',  MX: '52',  AR: '54',  CL: '56',
+    CO: '57',  NG: '234', KE: '254', EG: '20'
+  };
+
+  // Country dropdowns usually hold names, not codes. Google wants alpha-2.
+  // Extend this if your audience sits outside the list.
+  var COUNTRY_ALIASES = {
+    'united kingdom': 'GB', 'great britain': 'GB', 'uk': 'GB',
+    'england': 'GB', 'scotland': 'GB', 'wales': 'GB',
+    'northern ireland': 'GB',
+    'united states': 'US', 'united states of america': 'US',
+    'usa': 'US', 'america': 'US',
+    'ireland': 'IE', 'republic of ireland': 'IE',
+    'australia': 'AU', 'new zealand': 'NZ', 'canada': 'CA',
+    'south africa': 'ZA', 'germany': 'DE', 'france': 'FR',
+    'spain': 'ES', 'italy': 'IT', 'netherlands': 'NL',
+    'belgium': 'BE', 'portugal': 'PT', 'poland': 'PL',
+    'sweden': 'SE', 'norway': 'NO', 'denmark': 'DK',
+    'finland': 'FI', 'switzerland': 'CH', 'austria': 'AT',
+    'india': 'IN', 'japan': 'JP', 'china': 'CN',
+    'singapore': 'SG', 'united arab emirates': 'AE', 'uae': 'AE',
+    'brazil': 'BR', 'mexico': 'MX'
+  };
+
+  // Allowlist. A field is collected only if its normalised name matches
+  // one of these exactly (after prefix stripping), or it carries an
+  // explicit data-upd attribute. Nothing else leaves the page.
+  var SYNONYMS = {
+    email: [
+      'email', 'emailaddress', 'email_address', 'e_mail', 'mail'
+    ],
+    phone_number: [
+      'phone', 'phonenumber', 'phone_number', 'phone_no', 'tel',
+      'telephone', 'telephone_number', 'mobile', 'mobile_number',
+      'mobile_phone', 'cell', 'cellphone', 'cell_phone'
+    ],
+    first_name: [
+      'first_name', 'firstname', 'fname', 'first', 'given_name',
+      'givenname', 'forename'
+    ],
+    last_name: [
+      'last_name', 'lastname', 'lname', 'last', 'surname',
+      'family_name', 'familyname'
+    ],
+    street: [
+      'street', 'street_address', 'streetaddress', 'address',
+      'address_1', 'address1', 'address_line_1', 'addressline1',
+      'addr', 'addr1'
+    ],
+    city: [
+      'city', 'town', 'locality', 'city_town', 'town_city'
+    ],
+    region: [
+      'region', 'state', 'county', 'province', 'state_region'
+    ],
+    postal_code: [
+      'postcode', 'post_code', 'postalcode', 'postal_code',
+      'zip', 'zipcode', 'zip_code'
+    ],
+    country: [
+      'country', 'country_code', 'countrycode'
+    ]
+  };
+
+  // A single field holding a whole name. Split into first + last.
+  var FULL_NAME = ['name', 'full_name', 'fullname', 'complete_name'];
+
+  // Stripped from the front of a field name before matching, so
+  // `your-email` and `billing_email` both resolve to `email`.
+  var PREFIXES = [
+    'your', 'user', 'contact', 'billing', 'shipping', 'delivery',
+    'customer', 'client', 'primary', 'main', 'input', 'field',
+    'form', 'entry', 'the'
+  ];
+
+  var HASHED_KEYS = ['email', 'phone_number', 'first_name', 'last_name', 'street'];
+  var PLAIN_KEYS  = ['city', 'region', 'postal_code', 'country'];
+
+  function log() {
+    if (!DEBUG || !window.console) return;
+    try { console.log.apply(console, ['[form-tracking]'].concat([].slice.call(arguments))); } catch (e) {}
+  }
+
+  /* ── Install guard ──────────────────────────────────────────────────
+     Two tags share one set of DOM hooks. Re-running the same variant is
+     a no-op, so a tag that fires twice cannot double-count.            */
+
+  var STATE = window.__formTracking || (window.__formTracking = {
+    base: false, upd: false, hooked: false, handlers: [], resubmitting: false
+  });
+
+  if (COLLECT_USER_DATA ? STATE.upd : STATE.base) {
+    log('variant already installed, skipping');
     return;
   }
 
-  // Normalize keys to lowercase with underscores
-  function normalizeKey(str) {
-    return str.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '_');
+  if (COLLECT_USER_DATA && !(window.crypto && window.crypto.subtle)) {
+    // SubtleCrypto needs a secure context. Without it we cannot hash, and
+    // sending unhashed personal data is not an option.
+    log('SubtleCrypto unavailable (needs HTTPS) — user data disabled');
+    return;
   }
 
-  // SHA-256 hashing function
-  function hashString(str) {
-    str = str.trim().toLowerCase();
+  if (COLLECT_USER_DATA) { STATE.upd = true; } else { STATE.base = true; }
+
+  /* ── Normalisation ──────────────────────────────────────────────────
+     Google's documented rules: trim, lowercase, E.164 phone numbers, and
+     strip dots before the domain on gmail.com / googlemail.com.        */
+
+  function normKey(str) {
+    return String(str).trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
+  }
+
+  function stripPrefixes(key) {
+    var parts = key.split('_');
+    var guard = 0;
+    while (parts.length > 1 && guard < 3 && PREFIXES.indexOf(parts[0]) !== -1) {
+      parts.shift();
+      guard++;
+    }
+    return parts.join('_');
+  }
+
+  function normText(v) {
+    return String(v).trim().toLowerCase().replace(/\s+/g, ' ');
+  }
+
+  function normEmail(v) {
+    var s = String(v).trim().toLowerCase().replace(/\s+/g, '');
+    var at = s.lastIndexOf('@');
+    if (at < 1 || s.indexOf('.', at) === -1 || at === s.length - 1) return '';
+    var local = s.slice(0, at);
+    var domain = s.slice(at + 1);
+    if (domain === 'gmail.com' || domain === 'googlemail.com') {
+      local = local.replace(/\./g, '');
+    }
+    return local ? local + '@' + domain : '';
+  }
+
+  function normPhone(v) {
+    var s = String(v).trim();
+    // "(0)" is the explicit "drop this when dialling internationally"
+    // notation, as in +44 (0)7700 900123. Only the parenthesised form is
+    // safe to remove — a bare leading zero after the country code is part
+    // of the number in some countries (Italy, for one).
+    s = s.replace(/\(\s*0\s*\)/g, '');
+    var international = s.charAt(0) === '+';
+    var d = s.replace(/\D/g, '');
+    if (!d) return '';
+
+    if (!international) {
+      if (d.slice(0, 2) === '00') {
+        d = d.slice(2);
+      } else {
+        var cc = DIAL_CODES[String(DEFAULT_COUNTRY).toUpperCase()];
+        if (!cc) return '';                       // unknown country, don't guess
+        if (d.charAt(0) === '0') {
+          d = cc + d.replace(/^0+/, '');          // national trunk prefix
+        } else if (d.slice(0, cc.length) !== cc) {
+          d = cc + d;
+        }
+      }
+    }
+
+    // E.164 is 1–3 digits of country code plus up to 15 total.
+    if (d.length < 7 || d.length > 15) return '';
+    return '+' + d;
+  }
+
+  function normPostal(v) {
+    return String(v).trim().toLowerCase().replace(/\s+/g, '');
+  }
+
+  function normCountry(v) {
+    var s = String(v).trim();
+    if (/^[A-Za-z]{2}$/.test(s)) return s.toUpperCase();
+    var alias = COUNTRY_ALIASES[normText(s)];
+    return alias || '';                           // drop rather than mismatch
+  }
+
+  function splitFullName(v) {
+    var parts = normText(v).split(' ');
+    var clean = [];
+    for (var i = 0; i < parts.length; i++) { if (parts[i]) clean.push(parts[i]); }
+    if (clean.length < 2) return null;            // one word tells us nothing
+    return { first_name: clean[0], last_name: clean[clean.length - 1] };
+  }
+
+  function normalise(key, value) {
+    switch (key) {
+      case 'email':        return normEmail(value);
+      case 'phone_number': return normPhone(value);
+      case 'postal_code':  return normPostal(value);
+      case 'country':      return normCountry(value);
+      default:             return normText(value);
+    }
+  }
+
+  /* ── Hashing ────────────────────────────────────────────────────────
+     Hex-encoded SHA-256, lowercase, as Google requires.                */
+
+  function sha256Hex(str) {
     if (!str) return Promise.resolve('');
-    var encoder = new TextEncoder();
-    var data = encoder.encode(str);
-    return crypto.subtle.digest('SHA-256', data).then(function (buffer) {
-      var hashArray = Array.prototype.slice.call(new Uint8Array(buffer));
-      return hashArray.map(function (b) {
-        return ('00' + b.toString(16)).slice(-2);
-      }).join('');
-    }).catch(function (err) {
-      console.error('Hashing error:', err);
+    var data = new TextEncoder().encode(str);
+    return window.crypto.subtle.digest('SHA-256', data).then(function (buf) {
+      var bytes = new Uint8Array(buf);
+      var out = '';
+      for (var i = 0; i < bytes.length; i++) {
+        out += ('0' + bytes[i].toString(16)).slice(-2);
+      }
+      return out;
+    })['catch'](function (err) {
+      log('hash failed', err);
       return '';
     });
   }
 
-  function handleFormSubmit(eventOrForm) {
-    var form = eventOrForm.target || eventOrForm;
-    var formData = {};
-    var hashPromises = [];
-    var hashFields = ['email', 'phone', 'name', 'first_name', 'last_name', 'address', 'postcode', 'zip', 'country'];
-    var excludeFields = ['password', 'credit_card', 'cvc'];
+  /* ── Field matching ─────────────────────────────────────────────────
+     Explicit data-upd wins. Otherwise exact match against the allowlist
+     after prefix stripping. No substring matching — that is how v1.1
+     ended up hashing `company_name`.                                   */
 
-    for (var i = 0; i < form.elements.length; i++) {
-      var field = form.elements[i];
+  function canonicalKey(field) {
+    var explicit = field.getAttribute && field.getAttribute('data-upd');
+    if (explicit) {
+      var e = normKey(explicit);
+      if (e === 'ignore') return null;
+      if (e === 'full_name' || FULL_NAME.indexOf(e) !== -1) return 'full_name';
+      if (SYNONYMS.hasOwnProperty(e)) return e;
+      log('unknown data-upd value:', explicit);
+      return null;
+    }
 
-      if (
-        !field.name ||
-        field.disabled ||
-        field.tagName === 'BUTTON' ||
-        field.type === 'submit' ||
-        ((field.type === 'checkbox' || field.type === 'radio') && !field.checked)
-      ) {
+    var name = field.getAttribute && field.getAttribute('name');
+    if (!name) return null;
+
+    var key = stripPrefixes(normKey(name));
+    if (!key) return null;
+
+    if (FULL_NAME.indexOf(key) !== -1) return 'full_name';
+    for (var canonical in SYNONYMS) {
+      if (SYNONYMS.hasOwnProperty(canonical) &&
+          SYNONYMS[canonical].indexOf(key) !== -1) {
+        return canonical;
+      }
+    }
+    return null;
+  }
+
+  /* ── Form reading ───────────────────────────────────────────────────
+     form.elements and form.id are both clobberable by an input named
+     `elements` or `id`, so read them off the prototype / attributes.   */
+
+  var elementsGetter = (function () {
+    try {
+      var d = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements');
+      return (d && d.get) || null;
+    } catch (e) { return null; }
+  })();
+
+  function formElements(form) {
+    if (elementsGetter) {
+      try { return elementsGetter.call(form); } catch (e) {}
+    }
+    return form.querySelectorAll('input, select, textarea');
+  }
+
+  function formDetails(form) {
+    return {
+      form_id:   form.getAttribute('id') || '',
+      form_name: form.getAttribute('data-title') ||
+                 form.getAttribute('name') ||
+                 form.getAttribute('id') || 'unnamed_form',
+      page_path: location.pathname
+    };
+  }
+
+  function skipField(field) {
+    var type = (field.type || '').toLowerCase();
+    if (field.disabled) return true;
+    if (type === 'password') return true;                    // never, under any name
+    if (type === 'submit' || type === 'button' || type === 'reset' ||
+        type === 'image'  || type === 'file') return true;
+    if ((type === 'checkbox' || type === 'radio') && !field.checked) return true;
+    var ac = (field.getAttribute && field.getAttribute('autocomplete') || '').toLowerCase();
+    if (ac.indexOf('cc-') === 0 || ac === 'new-password' ||
+        ac === 'current-password') return true;              // payment / credentials
+    if (field.hasAttribute && field.hasAttribute('data-no-track')) return true;
+    return false;
+  }
+
+  // Returns a map of canonical key → normalised value, or null.
+  function readUserData(form) {
+    var els = formElements(form);
+    if (!els || typeof els.length !== 'number') return null;
+
+    var raw = {};
+    var found = false;
+
+    for (var i = 0; i < els.length; i++) {
+      var field = els[i];
+      if (!field || !field.tagName) continue;
+
+      if (SKIP_PASSWORD_FORMS && (field.type || '').toLowerCase() === 'password') {
+        log('password field present, skipping form');
+        return null;
+      }
+
+      if (skipField(field)) continue;
+
+      var key = canonicalKey(field);
+      if (!key) continue;
+
+      var value = field.value;
+      if (typeof value !== 'string' || !value.trim()) continue;
+
+      if (key === 'full_name') {
+        var split = splitFullName(value);
+        if (!split) continue;
+        if (!raw.first_name) { raw.first_name = split.first_name; found = true; }
+        if (!raw.last_name)  { raw.last_name  = split.last_name;  found = true; }
         continue;
       }
 
-      var rawKey = field.name;
-      var normKey = normalizeKey(rawKey);
-      var value = field.value.trim();
-
-      if (!value || excludeFields.indexOf(normKey) !== -1) continue;
-
-      var shouldHash = false;
-      for (var j = 0; j < hashFields.length; j++) {
-        if (normKey.indexOf(hashFields[j]) !== -1) {
-          shouldHash = true;
-          break;
-        }
-      }
-
-      if (shouldHash) {
-        (function (key, val) {
-          var promise = hashString(val).then(function (hash) {
-            formData['hashed_' + key] = hash;
-          });
-          hashPromises.push(promise);
-        })(normKey, value);
-      } else {
-        formData[normKey] = value;
-      }
+      if (raw[key]) continue;                       // first match wins
+      var norm = normalise(key, value);
+      if (!norm) continue;                          // failed validation, drop it
+      raw[key] = norm;
+      found = true;
     }
 
-    var formId = form.id || 'N/A';
-    var formName = form.getAttribute('data-title') || form.name || 'N/A';
+    return found ? raw : null;
+  }
 
-    Promise.all(hashPromises).then(function () {
-      if (Object.keys(formData).length > 0) {
-        window.dataLayer = window.dataLayer || [];
-        window.dataLayer.push({
-          event: 'form_submission_hashed',
-          form_details: {
-            form_id: formId,
-            form_name: formName
-          },
-          form_data: formData
-        });
-        console.log('✅ form_submission_hashed event pushed to dataLayer');
+  /* ── user_data assembly ─────────────────────────────────────────────
+     Google Ads UPD shape. Hashed: email, phone, first/last name, street.
+     Plain text: city, region, postal_code, country.                    */
+
+  function buildUserData(raw) {
+    var pending = [];
+    var hashed = {};
+
+    HASHED_KEYS.forEach(function (key) {
+      if (!raw[key]) return;
+      pending.push(sha256Hex(raw[key]).then(function (hex) {
+        if (hex) hashed[key] = hex;
+      }));
+    });
+
+    return Promise.all(pending).then(function () {
+      var userData = {};
+      if (hashed.email)        userData.sha256_email_address = hashed.email;
+      if (hashed.phone_number) userData.sha256_phone_number  = hashed.phone_number;
+
+      var address = {};
+      if (hashed.first_name) address.sha256_first_name = hashed.first_name;
+      if (hashed.last_name)  address.sha256_last_name  = hashed.last_name;
+      if (hashed.street)     address.sha256_street     = hashed.street;
+      PLAIN_KEYS.forEach(function (key) {
+        if (raw[key]) address[key] = raw[key];
+      });
+
+      for (var k in address) {
+        if (address.hasOwnProperty(k)) { userData.address = address; break; }
       }
+
+      // Google needs at least an email, a phone, or a usable address.
+      var hasAddress = !!(address.sha256_first_name && address.sha256_last_name &&
+                          address.postal_code && address.country);
+      if (!userData.sha256_email_address && !userData.sha256_phone_number && !hasAddress) {
+        log('no matchable identifier, dropping user_data');
+        return null;
+      }
+      return userData;
     });
   }
 
-  // Intercept .submit()
-  var originalSubmit = HTMLFormElement.prototype.submit;
-  HTMLFormElement.prototype.submit = function () {
-    handleFormSubmit(this);
-    return originalSubmit.apply(this, arguments);
-  };
+  function push(payload, onTagFired) {
+    window.dataLayer = window.dataLayer || [];
+    if (onTagFired) {
+      payload.eventTimeout = MAX_DELAY_MS;
+      payload.eventCallback = onTagFired;
+    }
+    window.dataLayer.push(payload);
+    log('pushed', payload.event, payload);
+  }
 
-  // Also catch manual submits
-  document.addEventListener('submit', function (e) {
-    handleFormSubmit(e);
-  }, true);
+  /* ── Handlers ───────────────────────────────────────────────────────
+     A handler returns a Promise when the submission must be held, or
+     null when it has already done its work synchronously.              */
+
+  if (COLLECT_USER_DATA) {
+    STATE.handlers.push(function (form) {
+      var details = formDetails(form);
+      var raw = readUserData(form);
+
+      if (!raw) {
+        push({ event: EVENT_NAME, form_details: details });
+        return null;                                // nothing to hash, don't hold
+      }
+
+      return buildUserData(raw).then(function (userData) {
+        return new Promise(function (resolve) {
+          var settled = false;
+          var done = function () { if (!settled) { settled = true; resolve(); } };
+          setTimeout(done, MAX_DELAY_MS);
+          var payload = { event: EVENT_NAME, form_details: details };
+          if (userData) payload.user_data = userData;
+          push(payload, done);
+        });
+      })['catch'](function (err) {
+        log('user data failed, falling back to base event', err);
+        push({ event: EVENT_NAME, form_details: details });
+        return null;
+      });
+    });
+  } else {
+    STATE.handlers.push(function (form) {
+      // When the user-data variant is installed it emits the enriched
+      // event instead. Checked at submit time, so tag firing order in GTM
+      // does not matter.
+      if (STATE.upd) return null;
+      push({ event: EVENT_NAME, form_details: formDetails(form) });
+      return null;
+    });
+  }
+
+  /* ── DOM hooks (installed once, shared by both variants) ───────────── */
+
+  if (!STATE.hooked) {
+    STATE.hooked = true;
+    STATE.nativeSubmit = HTMLFormElement.prototype.submit;
+
+    var collect = function (form) {
+      if (!form || form.tagName !== 'FORM') return [];
+      if (form.hasAttribute && form.hasAttribute('data-no-track')) return [];
+      var promises = [];
+      for (var i = 0; i < STATE.handlers.length; i++) {
+        try {
+          var result = STATE.handlers[i](form);
+          if (result && typeof result.then === 'function') promises.push(result);
+        } catch (err) {
+          log('handler threw', err);
+        }
+      }
+      return promises;
+    };
+
+    // Bubble phase, so validation libraries get to cancel first. A
+    // submission that something else prevents is not a conversion.
+    document.addEventListener('submit', function (e) {
+      if (STATE.resubmitting || e.defaultPrevented) return;
+      var form = e.target;
+      var promises = collect(form);
+      if (!promises.length) return;               // nothing async, let it go
+
+      e.preventDefault();
+
+      var submitter = e.submitter || null;
+      var released = false;
+      var release = function () {
+        if (released) return;
+        released = true;
+        try {
+          // Carry the clicked button's name/value, which a bare
+          // .submit() would otherwise drop.
+          if (submitter && submitter.name) {
+            var hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = submitter.name;
+            hidden.value = submitter.value || '';
+            form.appendChild(hidden);
+          }
+          STATE.resubmitting = true;
+          STATE.nativeSubmit.call(form);          // does not re-fire submit
+        } catch (err) {
+          log('resubmit failed', err);
+        } finally {
+          STATE.resubmitting = false;
+        }
+      };
+
+      Promise.all(promises).then(release, release);
+      setTimeout(release, MAX_DELAY_MS);          // the form always submits
+    }, false);
+
+    // Programmatic form.submit() fires no submit event, so hook it too.
+    HTMLFormElement.prototype.submit = function () {
+      var form = this;
+      var args = arguments;
+      var native = function () { return STATE.nativeSubmit.apply(form, args); };
+
+      if (STATE.resubmitting) return native();
+
+      var promises = collect(form);
+      if (!promises.length) return native();
+
+      var released = false;
+      var release = function () {
+        if (released) return;
+        released = true;
+        STATE.resubmitting = true;
+        try { native(); } catch (err) { log('submit failed', err); }
+        finally { STATE.resubmitting = false; }
+      };
+
+      Promise.all(promises).then(release, release);
+      setTimeout(release, MAX_DELAY_MS);
+    };
+  }
+
+  log('installed', COLLECT_USER_DATA ? '(user-provided data)' : '(base)');
 })();
 </script>
