@@ -517,13 +517,14 @@
   }
 
   /*
-    Deliberately no page_path. GTM already exposes {{Page Path}}, and on
-    sites that put identifiers in the URL (/account/<email>/reset,
-    /booking/AB12CD) copying it here would push personal data through the
-    base tag, which carries no consent requirement at all.
+    Deliberately no page path. Nothing here needs one, and GTM can read
+    the URL itself if a tag ever wants it. Copying it into the dataLayer
+    would mean that on a site putting identifiers in the URL
+    (/account/<email>/reset, /booking/AB12CD) every form submission
+    disclosed one, including when consent has been denied.
 
     form_id and form_name are page-controlled strings. A templated form
-    title that interpolates a customer name would land here, so keep form
+    title interpolating a customer name would land here, so keep form
     titles static.
   */
   function formDetails(form) {
