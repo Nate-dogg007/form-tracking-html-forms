@@ -89,36 +89,72 @@ it poisons the match data with something that is not a person.
 
 ## Install
 
-The script goes into GTM twice, as two Custom HTML tags. One line differs between them.
+You paste the **whole `html-forms` file** into a GTM Custom HTML tag. Then you do it a second
+time into a second tag, and change one line. The two tags hold the same script; the only
+difference is one `false` becoming `true`.
 
-### Tag A: form tracking (base)
+The top of the file has a config block that looks like this:
 
 ```js
+/* ══ CONFIG ══════════════════════════════════════════════════════════ */
+
+// false = Tag A (base) · true = Tag B (user-provided data)
 var COLLECT_USER_DATA = false;
+
+// ISO 3166-1 alpha-2 for your primary audience...
+var DEFAULT_COUNTRY = 'GB';
+...
 ```
 
-- Trigger: All Pages
-- Consent Settings: no additional consent required
+That is the line you edit. Everything else stays as it is.
 
-Pushes `form_submit` with the form id and form name. No field values, and deliberately no page
-path: GTM already exposes `{{Page Path}}`, and on a site that puts identifiers in the URL
-(`/account/<email>/reset`) copying it here would push personal data through the tag that carries
-no consent requirement.
+### Tag A — "Form tracking (base)"
 
-### Tag B: form tracking (user-provided data)
+1. Tags → New → Tag Configuration → **Custom HTML**.
+2. Open `html-forms`, copy **all of it** (including the `<script>` tags at the top and bottom),
+   and paste it into the HTML box.
+3. Leave `var COLLECT_USER_DATA = false;` exactly as it is.
+4. Set `var DEFAULT_COUNTRY` to the right country for this site. See below.
+5. Triggering → **All Pages**.
+6. Advanced Settings → Consent Settings → **No additional consent required**.
+7. Save.
 
-```js
-var COLLECT_USER_DATA = true;
-```
+This tag pushes `form_submit` with the form id and form name, and nothing else. No field values,
+so there is nothing to gate. There is deliberately no page path either: GTM already exposes
+`{{Page Path}}`, and on a site that puts identifiers in the URL (`/account/<email>/reset`)
+copying it here would push personal data through the one tag that has no consent requirement.
 
-- Trigger: All Pages
-- Consent Settings: **Require additional consent for tag to fire** → `ad_user_data`, `ad_storage`
+### Tag B — "Form tracking (user-provided data)"
 
-Pushes `form_submit` with the `user_data` object attached.
+1. Tags → New → Tag Configuration → **Custom HTML**.
+2. Paste **the same whole file again**.
+3. Change that one line to `var COLLECT_USER_DATA = true;`.
+4. Set `var DEFAULT_COUNTRY` to the same value you used in Tag A.
+5. Triggering → **All Pages**.
+6. Advanced Settings → Consent Settings → **Require additional consent for tag to fire**, and
+   add `ad_user_data` and `ad_storage`.
+7. Save.
 
-Exactly one `form_submit` fires per submission. When Tag B is running it emits the enriched
-event and Tag A stays silent, so there is nothing to de-duplicate: one trigger, one Google Ads
-tag.
+This tag pushes `form_submit` with the `user_data` object attached.
+
+### What happens then
+
+Both tags fire on every page, but only one `form_submit` event is produced per submission. When
+Tag B is present it emits the enriched event and Tag A stays silent, so you build **one** trigger
+and **one** Google Ads tag and there is nothing to de-duplicate.
+
+If your CMP has not granted `ad_user_data`, GTM never runs Tag B, so Tag A's plain event is what
+fires. Grant consent and Tag B takes over from that point on.
+
+### Why two tags rather than one
+
+So that the code which reads personal data out of a form is not even present on the page until
+consent exists. The script also re-checks consent on every submission (see below), so a single
+tag with `COLLECT_USER_DATA = true` and no GTM consent setting would behave correctly too. Two
+tags means two independent gates instead of one, and an earlier version of the runtime check was
+found to fail open in seven different ways during review — which is the argument for not making
+it the only thing standing between a visitor and their data. Use one tag if you would rather keep
+the container simple; use two if you want the belt and braces. The README assumes two.
 
 ### Check this one setting
 
@@ -127,13 +163,13 @@ var DEFAULT_COUNTRY = 'GB';
 ```
 
 This converts national phone formats to E.164. Get it wrong and every hashed phone number
-silently fails to match. Numbers already in international format (`+44...`, `0044...`) are used
-as they are, so this only matters for people typing `07700 900123`. Extend `DIAL_CODES` if your
-country is not listed.
+silently fails to match, with no error anywhere. Numbers already in international format
+(`+44...`, `0044...`) are used as they are, so it only matters for people typing `07700 900123`.
+Extend `DIAL_CODES` if your country is not listed.
 
-`COUNTRY_ALIASES` does the same job for country dropdowns that hold names rather than ISO
-codes. A country value that is neither two letters nor a listed alias is dropped rather than
-sent as a guess.
+`COUNTRY_ALIASES` does the same job for country dropdowns holding names rather than ISO codes. A
+country value that is neither two letters nor a listed alias is dropped rather than sent as a
+guess.
 
 ## Consent
 
