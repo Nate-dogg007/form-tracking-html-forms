@@ -23,10 +23,15 @@ const SOURCE = readFileSync(join(HERE, '..', 'html-forms'), 'utf8')
 
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
-const variant = (collect) => {
+const variant = (collect, country) => {
   const flag = `var COLLECT_USER_DATA = ${collect};`;
-  const out = SOURCE.replace(/var COLLECT_USER_DATA = (?:true|false);/, flag);
+  let out = SOURCE.replace(/var COLLECT_USER_DATA = (?:true|false);/, flag);
   if (!out.includes(flag)) throw new Error('could not set COLLECT_USER_DATA');
+  if (country) {
+    const cflag = `var DEFAULT_COUNTRY = '${country}';`;
+    out = out.replace(/var DEFAULT_COUNTRY = '[A-Za-z]{2}';/, cflag);
+    if (!out.includes(cflag)) throw new Error('could not set DEFAULT_COUNTRY');
+  }
   return out;
 };
 
@@ -105,10 +110,93 @@ const PAGES = {
       <input name="email" value="prog@example.com">
     </form>`),
 
+  // The cancelling handler is delegated on `document` and registers AFTER
+  // the tag, which is the ordering on a stock WordPress site: GTM in the
+  // head, theme jQuery in the footer. The /cancelled page tests a handler
+  // on the form itself, which always worked.
+  '/delegated-cancel': page(`
+    <form id="dc" action="/thanks" method="get">
+      <input name="email" value="wp@example.com">
+      <textarea name="message">secret enquiry text</textarea>
+      <button type="submit">Send</button>
+    </form>
+    <script>
+      window.__ajaxFired = 0;
+      document.addEventListener('submit', function (e) {
+        window.__ajaxFired++;
+        e.preventDefault();
+      });
+    </script>`),
+
+  '/formaction': page(`
+    <form id="fa" action="/thanks" method="get">
+      <input name="email" value="fa@example.com">
+      <button type="submit" name="op" value="draft" formaction="/other">Save draft</button>
+    </form>`),
+
+  '/other': page('<h1>other</h1>'),
+
+  '/hidden': page(`
+    <form id="hid" action="/thanks" method="get">
+      <input type="hidden" name="email" value="salesrep@internal-crm.example">
+      <input type="hidden" name="name"  value="Assigned Owner Bob">
+      <input name="phone" value="07700 900123">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/output-el': page(`
+    <form id="oe" action="/thanks" method="get">
+      <output name="email">rendered@example.com</output>
+      <input name="phone" value="07700 900123">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/free-text-region': page(`
+    <form id="ftr" action="/thanks" method="get">
+      <input name="email" value="ft@example.com">
+      <input name="state" value="I am currently signed off sick with depression">
+      <input name="city"  value="Southampton">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/builders': page(`
+    <form id="builders" action="/thanks" method="get">
+      <input name="form_fields[email]"  value="elementor@example.com">
+      <input name="form_fields[name]"   value="Elle Mentor">
+      <input name="mobilephone"         value="07700 900123">
+      <input name="address[zip]"        value="SO99 9XX">
+      <input name="address[province]"   value="Hampshire">
+      <input name="address[address1]"   value="123 New Rd">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/clobber-global': page(`
+    <a id="__formTracking">clobbered</a>
+    <form id="cg" action="/thanks" method="get">
+      <input name="email" value="cg@example.com">
+      <button type="submit">Send</button>
+    </form>`),
+
   '/no-fields': page(`
     <form id="nf" action="/thanks" method="get">
       <input name="subject" value="General enquiry">
       <textarea name="message">nothing matchable here</textarea>
+      <button type="submit">Send</button>
+    </form>`),
+
+  // Submits into an iframe so the page survives, letting one test submit
+  // twice with a consent withdrawal in between.
+  '/consent': page(`
+    <iframe name="sink" style="display:none"></iframe>
+    <form id="cf" action="/thanks" method="get" target="sink">
+      <input name="email" value="consent@example.com">
+      <input name="phone" value="07700 900123">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/email': page(`
+    <form id="em-form" action="/thanks" method="get">
+      <input id="em" name="email" value="">
       <button type="submit">Send</button>
     </form>`),
 
@@ -188,13 +276,21 @@ async function run(path, variants, act, opts = {}) {
   await pg.addInitScript(
     opts.silentGtm ? DATALAYER_STUB.replace('if (cb) setTimeout(cb, 10);', '') : DATALAYER_STUB
   );
-  for (const v of variants) await pg.addInitScript(variant(v));
+  // injectAfterLoad models GTM running the tag on a consent update, after
+  // the DOM already exists, rather than at document-start.
+  if (!opts.injectAfterLoad) {
+    for (const v of variants) await pg.addInitScript(variant(v, opts.country));
+  }
   await pg.goto(`${BASE}${path}`);
+  if (opts.injectAfterLoad) {
+    for (const v of variants) await pg.addScriptTag({ content: variant(v, opts.country) });
+  }
   await (act || (async (p) => { await p.click('button[type=submit]'); }))(pg);
   await pg.waitForTimeout(opts.silentGtm ? 1800 : 400);
   const url = pg.url();
+  const submissions = records.filter((r) => r.event === 'form_submit');
   await ctx.close();
-  return { records, url };
+  return { records, submissions, url };
 }
 
 /* ── Tests ───────────────────────────────────────────────────────────── */
@@ -279,6 +375,162 @@ console.log('\nwaiting for tags before navigating');
 {
   const { url } = await run('/contact', [true], null, { silentGtm: true });
   check('silent GTM: user-data path still submits on timeout', url.includes('/thanks'), url);
+}
+
+console.log('\nnot overriding another script’s cancellation');
+{
+  // Both independent reviewers reproduced this: a delegated handler on
+  // document, registered after the tag, cancels the submit and the script
+  // used to natively re-submit anyway. The site's AJAX fires AND the page
+  // navigates, so the lead posts twice and the form contents end up in a
+  // URL the site deliberately prevented.
+  const { submissions, url } = await run('/delegated-cancel', [true]);
+  check('delegated preventDefault is respected: no navigation',
+    !url.includes('/thanks'), url);
+  check('delegated preventDefault is respected: no conversion',
+    submissions.length === 0, JSON.stringify(submissions));
+  check('form contents never reach a URL',
+    !url.includes('wp%40example.com') && !url.includes('secret'), url);
+}
+{
+  // Same check for the base tag, which the README calls personal-data-free.
+  const { url } = await run('/delegated-cancel', [false]);
+  check('base tag also respects it', !url.includes('/thanks'), url);
+}
+
+console.log('\nsubmitter button');
+{
+  const { url } = await run('/contact', [true]);
+  check('submitter name/value carried through the deferral',
+    url.includes('action=send'), url);
+}
+{
+  const { url } = await run('/formaction', [true]);
+  check('formaction override respected', url.includes('/other'), url);
+  check('and the submitter value still carried', url.includes('op=draft'), url);
+}
+{
+  const { submissions, url } = await run('/contact', [true], async (p) => {
+    // Both clicks in one synchronous turn. Going through Playwright's
+    // actionability checks lets the hold finish first, which hides the race.
+    await p.evaluate(() => {
+      const b = document.querySelector('button[type=submit]');
+      b.click();
+      b.click();
+    });
+  });
+  check('double click fires one conversion, not two',
+    submissions.length === 1, `got ${submissions.length}`);
+  check('double click does not duplicate the submitter param',
+    (url.match(/action=send/g) || []).length === 1, url);
+}
+
+console.log('\nconsent withdrawn mid-session');
+{
+  const { submissions } = await run('/consent', [true], async (p) => {
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(300);
+    await p.evaluate(() => window.dataLayer.push(
+      ['consent', 'update', { ad_user_data: 'denied', ad_storage: 'denied' }]));
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(300);
+  });
+  check('two submissions recorded', submissions.length === 2, `got ${submissions.length}`);
+  check('first submission (consent granted) carries user_data', !!submissions[0]?.user_data);
+  check('second submission (consent withdrawn) carries NONE',
+    !submissions[1]?.user_data, JSON.stringify(submissions[1]?.user_data));
+}
+
+console.log('\nfields the site controls, not the visitor');
+{
+  const { submissions } = await run('/hidden', [true]);
+  const blob = JSON.stringify(submissions);
+  check('hidden field email not hashed as the visitor’s',
+    !blob.includes(sha256('salesrep@internal-crm.example')), blob);
+  check('hidden field name not hashed as the visitor’s',
+    !blob.includes(sha256('assigned')) && !blob.includes(sha256('bob')));
+  check('the real visible field is still collected',
+    submissions[0]?.user_data?.sha256_phone_number === sha256('+447700900123'));
+}
+{
+  const { submissions } = await run('/output-el', [true]);
+  check('<output> is not collected',
+    !submissions[0]?.user_data?.sha256_email_address,
+    JSON.stringify(submissions[0]?.user_data));
+}
+{
+  const { submissions } = await run('/free-text-region', [true]);
+  const addr = submissions[0]?.user_data?.address || {};
+  check('prose in a field named "state" is dropped, not sent in the clear',
+    !addr.region, addr.region);
+  check('a real city still passes', addr.city === 'southampton', addr.city);
+}
+{
+  const { submissions } = await run('/contact', [true], null,
+    { injectAfterLoad: true });
+  check('form_details carries no page_path',
+    !('page_path' in (submissions[0]?.form_details || {})),
+    JSON.stringify(submissions[0]?.form_details));
+}
+{
+  const { submissions } = await run('/clobber-global', [true], null,
+    { injectAfterLoad: true });
+  check('id="__formTracking" cannot disable tracking',
+    submissions[0]?.user_data?.sha256_email_address === sha256('cg@example.com'),
+    JSON.stringify(submissions));
+}
+
+console.log('\nreal-world form builders');
+{
+  const { submissions } = await run('/builders', [true]);
+  const ud = submissions[0]?.user_data || {};
+  const addr = ud.address || {};
+  check('Elementor form_fields[email]',
+    ud.sha256_email_address === sha256('elementor@example.com'));
+  check('Elementor form_fields[name] split',
+    addr.sha256_first_name === sha256('elle') && addr.sha256_last_name === sha256('mentor'));
+  check('HubSpot mobilephone',
+    ud.sha256_phone_number === sha256('+447700900123'));
+  check('Shopify address[zip]', addr.postal_code === 'so999xx', addr.postal_code);
+  check('Shopify address[province]', addr.region === 'hampshire', addr.region);
+  check('Shopify address[address1]', addr.sha256_street === sha256('123 new rd'));
+}
+{
+  // The prefix work must not break what already matched.
+  const { submissions } = await run('/split-name', [true]);
+  check('address_1 still resolves to street, not stripped as a prefix',
+    submissions[0]?.user_data?.address?.sha256_street === sha256('123 new rd'));
+}
+
+console.log('\ngmail normalisation');
+for (const [input, expected] of [
+  ['Jane.Doe+Shopping@googlemail.com', 'janedoe@googlemail.com'],
+  ['jane.doe+forms@gmail.com',         'janedoe@gmail.com'],
+  ['jane.doe@gmail.com',               'janedoe@gmail.com'],
+  ['jane.doe+forms@example.com',       'jane.doe+forms@example.com']
+]) {
+  const { submissions } = await run('/email', [true], async (p) => {
+    await p.fill('#em', input);
+    await p.click('button[type=submit]');
+  });
+  check(`"${input}" → ${expected}`,
+    submissions[0]?.user_data?.sha256_email_address === sha256(expected),
+    submissions[0]?.user_data?.sha256_email_address);
+}
+
+console.log('\nphone → E.164 (DEFAULT_COUNTRY = IT)');
+for (const [input, expected, label] of [
+  ['06 1234 5678',     '+390612345678', 'Rome landline keeps its trunk zero'],
+  ['+39 06 1234 5678', '+390612345678', 'international form unchanged'],
+  ['320 1234567',      '+393201234567', 'mobile has no trunk zero to keep']
+]) {
+  const { submissions } = await run('/phone', [true], async (p) => {
+    await p.fill('#tel', input);
+    await p.click('button[type=submit]');
+  }, { country: 'IT' });
+  check(`${label}: "${input}" → ${expected}`,
+    submissions[0]?.user_data?.sha256_phone_number === sha256(expected),
+    submissions[0]?.user_data?.sha256_phone_number);
 }
 
 console.log('\nphone → E.164 (DEFAULT_COUNTRY = GB)');

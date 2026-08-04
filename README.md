@@ -7,9 +7,18 @@ Captures native HTML form submissions, normalises and SHA-256 hashes the user-pr
 fields Google Ads wants, and pushes one `form_submit` event to the dataLayer. Personal data is
 only ever read once your CMP has granted `ad_user_data`.
 
-This feeds **Google Ads enhanced conversions only**. Do not wire the `user_data` object into
-GA4. Sending personal data to Analytics breaks Google's terms whether it is hashed or not, and
-hashing does not exempt you. See [Best practices to avoid sending PII](https://support.google.com/analytics/answer/6366371).
+This feeds **Google Ads enhanced conversions only**. Do not put the hashed fields into GA4 event
+parameters or custom dimensions: that is what
+[Best practices to avoid sending PII](https://support.google.com/analytics/answer/6366371)
+prohibits, and hashing does not exempt you from it, because hashed data is pseudonymous rather
+than anonymous and remains personal data under UK GDPR
+([ICO](https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/data-sharing/anonymisation/pseudonymisation/)).
+
+If you do want this data in GA4, there is a supported route:
+[user-provided data collection](https://support.google.com/analytics/answer/14077171), which is a
+separate opt-in feature with its own policy acknowledgement and an Ads link. This script does not
+target it. Use event parameters for that and you are breaking the rules; use the official feature
+and you are not.
 
 ## If you are upgrading from 1.0 or 1.1
 
@@ -55,7 +64,18 @@ Field names are matched exactly after a common prefix is stripped, so `your-emai
 and is dropped. A single `name` field is split on whitespace into first and last.
 
 Never collected, regardless of what it is called: anything of `type="password"`, anything with
-`autocomplete="cc-*"`, and by default any form that contains a password field at all.
+`autocomplete="cc-*"`, and anything that is not an `input`, `select` or `textarea`. Hidden fields
+are skipped too, because they are populated by the site rather than the visitor, and CRM forms
+routinely carry a hidden owner or assigned-rep email that would otherwise be hashed and reported
+as the person who submitted. Use `data-upd` to opt a hidden field in deliberately.
+
+By default, a form containing a password field has no fields read at all. It still produces a
+bare `form_submit` with the form id and name, so a login is counted as an event but never as
+identifiable data.
+
+`city` and `region` are the only free-text fields sent unhashed, so they are shape-checked before
+being passed through: anything over 60 characters, containing an `@`, running to more than four
+words or holding a long digit run is dropped. A field named `state` is not always a US state.
 
 ## Install
 
@@ -111,12 +131,25 @@ data for advertising, and once it is in the dataLayer any other tag or third-par
 the page can read it.
 
 Tag-level consent checks in GTM do not help with that, because they gate the tag, not a push
-that has already happened. So the gate is on the payload. GTM will not run Tag B until your CMP
-grants `ad_user_data`, which is the Consent Mode v2 signal for sending user-provided data to
-Google for advertising. Until then nothing personal is read, hashed or pushed.
+that has already happened. So the gate is on the payload, in two places.
 
-If consent is granted part way through a session, GTM fires Tag B on the consent update. A form
-submitted before that point produces the base event only. That is correct, not a bug.
+**Before consent.** GTM will not run Tag B until your CMP grants `ad_user_data`, the Consent Mode
+v2 signal for sending user-provided data to Google for advertising. Until then nothing personal
+is read, hashed or pushed. If consent is granted part way through a session GTM fires Tag B on
+the consent update, and a form submitted before that point produces the base event only.
+
+**After withdrawal.** GTM checks consent once, when it decides whether to run the tag. That is
+not enough on its own, because the listener Tag B installs lives for the rest of the page. So the
+script re-checks `ad_user_data` on every submission, reading the last consent `default` or
+`update` in the dataLayer, and falls back to the base payload when it has been withdrawn.
+Without that, someone who withdrew consent mid-session would carry on having their data read and
+hashed until they navigated away.
+
+If your CMP does something the dataLayer does not reflect, set `window.formTrackingConsentFn` to
+a function returning `false` when user data must not be collected. It overrides the dataLayer
+check, and a function that throws is treated as denied.
+
+Consent for the Google Ads conversion tag itself is a separate matter, covered below.
 
 ## GTM setup
 
@@ -169,9 +202,20 @@ the ten the old README asked for. The script already emits Google's expected sha
 - Conversion ID and Label: from your Google Ads conversion action
 - Include user-provided data: select the User-Provided Data variable from step 2
 - Trigger: Custom Event = `form_submit`
+- Consent Settings: **Require additional consent** → `ad_storage`
 
 One tag covers both cases. If Tag B never ran, `{{DLV - user_data}}` is undefined and the
 conversion fires without enhanced data, which is what you want.
+
+The `ad_storage` requirement on this tag is not optional. The script's consent gate governs
+reading personal data out of the form; it has no say over the conversion tag, which writes `_gcl`
+cookies and needs consent in its own right under PECR.
+
+**Put a condition on the trigger.** The script listens to every form on the site, so a bare
+Custom Event trigger will count site search, login, newsletter signups and filter forms as
+conversions. Add a condition on `{{DLV - form_id}}` or `{{DLV - form_name}}` naming the forms
+that are genuinely leads. Relying on `data-no-track` across every other form means editing markup
+you may not control.
 
 Enhanced conversions also has to be switched on in Google Ads itself, under Goals →
 Conversions → Settings.
@@ -216,13 +260,15 @@ npm install playwright
 node test/form-tracking.test.mjs
 ```
 
-62 assertions. It caught two real bugs during the 1.2 rewrite: `+44 (0)7700 900123` hashing as
-`+4407700900123` because the parenthesised trunk prefix survived, and the consent-denied event
-navigating away without waiting for its tag to fire. Run it after editing the script.
+96 assertions, 23 of which fail against 1.1 and the first draft of 1.2. Run it after editing the
+script. It has caught every real defect found in this rewrite so far, including the two most
+serious: the script overriding another handler's `preventDefault()` and force-submitting a form
+the site had cancelled, and personal data still being collected after consent was withdrawn.
 
 ## Requirements and limits
 
-- Standard HTML form submissions. AJAX and JavaScript-rendered forms are not supported, use the
+- Standard HTML form submissions. AJAX and JavaScript-rendered forms are not tracked: the script
+  sees the cancellation and stands down, so they keep working normally but produce no event. Use the
   Ninja Forms or Gravity Forms scripts instead. Those are still on the older approach and carry
   the phone and postcode problems described above until they are updated.
 - HTTPS. `crypto.subtle` only exists in a secure context, so Tag B does nothing on plain HTTP.
@@ -231,8 +277,14 @@ navigating away without waiting for its tag to fire. Run it after editing the sc
   `MAX_DELAY_MS` (1200ms default). This applies whether or not consent was granted: a conversion
   pixel that has not left the browser before the page unloads is a lost conversion. The form
   always submits, timeout or not.
-- Submissions are caught in the bubble phase so validation libraries get to cancel first. A form
-  handler that calls `stopPropagation()` will hide the submission from the script entirely.
+- Submissions are caught in the bubble phase on `window`, which runs after every `document`
+  listener whatever order they registered in. That is deliberate: anything cancelling the
+  submission must win, even a delegated handler added after the GTM container. The cost is that a
+  handler calling `stopPropagation()` hides the submission from the script entirely. Losing a
+  conversion beats breaking a form.
+- `DEFAULT_COUNTRY` also drives `KEEP_TRUNK_ZERO`, the short list of countries where the national
+  leading zero belongs in the E.164 number. Italy is on it: `06 1234 5678` is `+390612345678`,
+  not `+39612345678`. Check your market before trusting the list.
 - `HTMLFormElement.prototype.submit` is patched once so programmatic submissions are caught.
   This defers the call slightly, which will matter if your code does something immediately
   after calling `submit()`.

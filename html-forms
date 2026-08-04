@@ -117,7 +117,8 @@
     phone_number: [
       'phone', 'phonenumber', 'phone_number', 'phone_no', 'tel',
       'telephone', 'telephone_number', 'mobile', 'mobile_number',
-      'mobile_phone', 'cell', 'cellphone', 'cell_phone'
+      'mobile_phone', 'cell', 'cellphone', 'cell_phone',
+      'mobilephone', 'homephone', 'workphone'      // HubSpot property names
     ],
     first_name: [
       'first_name', 'firstname', 'fname', 'first', 'given_name',
@@ -155,11 +156,23 @@
   var PREFIXES = [
     'your', 'user', 'contact', 'billing', 'shipping', 'delivery',
     'customer', 'client', 'primary', 'main', 'input', 'field',
-    'form', 'entry', 'the'
+    'form', 'entry', 'the', 'address', 'fields'
   ];
+
+  // Countries where the national trunk zero is part of the E.164 number
+  // rather than something to strip. Italian landlines keep it: 06 1234 5678
+  // is +39 06 1234 5678, not +39 612345678. Check your market before
+  // trusting this list; it is short because most countries drop the zero.
+  var KEEP_TRUNK_ZERO = ['IT'];
 
   var HASHED_KEYS = ['email', 'phone_number', 'first_name', 'last_name', 'street'];
   var PLAIN_KEYS  = ['city', 'region', 'postal_code', 'country'];
+
+  // city and region are passed through unhashed, so they are the one route
+  // by which free text could reach the dataLayer. A field named `state` is
+  // not always a US state ("please state your requirements"), so validate
+  // shape rather than trusting the field name.
+  var MAX_PLAIN_LENGTH = 60;
 
   function log() {
     if (!DEBUG || !window.console) return;
@@ -170,9 +183,18 @@
      Two tags share one set of DOM hooks. Re-running the same variant is
      a no-op, so a tag that fires twice cannot double-count.            */
 
-  var STATE = window.__formTracking || (window.__formTracking = {
-    base: false, upd: false, hooked: false, handlers: [], resubmitting: false
-  });
+  // Shape-checked, because `window.__formTracking` is clobberable by any
+  // element carrying id="__formTracking". Without this, an HTML injection
+  // sink with no script at all silently kills conversion tracking.
+  var STATE = window.__formTracking;
+  if (!STATE || typeof STATE !== 'object' || !(STATE.handlers instanceof Array)) {
+    STATE = window.__formTracking = {
+      base: false, upd: false, hooked: false, handlers: [],
+      resubmitting: false, inFlight: []
+    };
+  }
+
+  if (!(STATE.inFlight instanceof Array)) STATE.inFlight = [];
 
   if (COLLECT_USER_DATA ? STATE.upd : STATE.base) {
     log('variant already installed, skipping');
@@ -188,6 +210,49 @@
 
   if (COLLECT_USER_DATA) { STATE.upd = true; } else { STATE.base = true; }
 
+  /* ── Runtime consent ────────────────────────────────────────────────
+     GTM checks consent once, when it decides whether to run this tag.
+     That is not enough on its own. The listener installed here lives for
+     the whole page, so a visitor who withdraws consent mid-session would
+     otherwise keep having their data read, hashed and disclosed into a
+     global array that every other tag on the page can read. So consent is
+     re-checked on every submission, not just at install.
+
+     Read from the dataLayer rather than google_tag_data.ics, which is
+     internal and undocumented. Consent Mode writes every default and
+     update call into the dataLayer, so the last one to mention
+     ad_user_data is the current state. Override with
+     window.formTrackingConsentFn if your CMP does something unusual.    */
+
+  function consentGranted() {
+    if (typeof window.formTrackingConsentFn === 'function') {
+      try {
+        return window.formTrackingConsentFn() !== false;
+      } catch (err) {
+        log('consent function threw, treating as denied', err);
+        return false;
+      }
+    }
+
+    var dl = window.dataLayer;
+    // No dataLayer to read means GTM ran this tag on the consent it had,
+    // and nothing has changed since.
+    if (!dl || typeof dl.length !== 'number') return true;
+
+    var granted = true;
+    for (var i = 0; i < dl.length; i++) {
+      var entry = dl[i];
+      if (!entry || entry[0] !== 'consent') continue;
+      if (entry[1] !== 'default' && entry[1] !== 'update') continue;
+      var settings = entry[2];
+      if (!settings || typeof settings !== 'object') continue;
+      if (typeof settings.ad_user_data === 'string') {
+        granted = settings.ad_user_data === 'granted';
+      }
+    }
+    return granted;
+  }
+
   /* ── Normalisation ──────────────────────────────────────────────────
      Google's documented rules: trim, lowercase, E.164 phone numbers, and
      strip dots before the domain on gmail.com / googlemail.com.        */
@@ -199,14 +264,36 @@
       .replace(/^_|_$/g, '');
   }
 
-  function stripPrefixes(key) {
+  function lookup(key) {
+    if (FULL_NAME.indexOf(key) !== -1) return 'full_name';
+    for (var canonical in SYNONYMS) {
+      if (SYNONYMS.hasOwnProperty(canonical) &&
+          SYNONYMS[canonical].indexOf(key) !== -1) return canonical;
+    }
+    return null;
+  }
+
+  /*
+    Try the allowlist at every prefix-strip level, most specific first.
+    Matching only the fully stripped key meant `form_fields[email]`
+    (Elementor) stalled on `fields_email` and `address[zip]` (Shopify)
+    never stripped at all, so those forms produced nothing. Going level by
+    level also keeps `address_1` resolving to street, because it matches
+    before `address` is treated as a prefix.
+  */
+  function matchKey(key) {
     var parts = key.split('_');
     var guard = 0;
-    while (parts.length > 1 && guard < 3 && PREFIXES.indexOf(parts[0]) !== -1) {
+    while (guard <= 4) {
+      var candidate = parts.join('_');
+      if (!candidate) return null;
+      var hit = lookup(candidate);
+      if (hit) return hit;
+      if (parts.length < 2 || PREFIXES.indexOf(parts[0]) === -1) return null;
       parts.shift();
       guard++;
     }
-    return parts.join('_');
+    return null;
   }
 
   function normText(v) {
@@ -220,7 +307,11 @@
     var local = s.slice(0, at);
     var domain = s.slice(at + 1);
     if (domain === 'gmail.com' || domain === 'googlemail.com') {
-      local = local.replace(/\./g, '');
+      // Google's rule for these two domains: drop the plus suffix, then the
+      // periods. Jane.Doe+Shopping@googlemail.com -> janedoe@googlemail.com.
+      // Skipping the plus step produces a hash Google will never hold, and
+      // plus-addressing is common among the people filling in marketing forms.
+      local = local.split('+')[0].replace(/\./g, '');
     }
     return local ? local + '@' + domain : '';
   }
@@ -228,9 +319,7 @@
   function normPhone(v) {
     var s = String(v).trim();
     // "(0)" is the explicit "drop this when dialling internationally"
-    // notation, as in +44 (0)7700 900123. Only the parenthesised form is
-    // safe to remove — a bare leading zero after the country code is part
-    // of the number in some countries (Italy, for one).
+    // notation, as in +44 (0)7700 900123.
     s = s.replace(/\(\s*0\s*\)/g, '');
     var international = s.charAt(0) === '+';
     var d = s.replace(/\D/g, '');
@@ -240,14 +329,17 @@
       if (d.slice(0, 2) === '00') {
         d = d.slice(2);
       } else {
-        var cc = DIAL_CODES[String(DEFAULT_COUNTRY).toUpperCase()];
+        var country = String(DEFAULT_COUNTRY).toUpperCase();
+        var cc = DIAL_CODES[country];
         if (!cc) return '';                       // unknown country, don't guess
-        if (d.charAt(0) === '0') {
+        if (d.charAt(0) === '0' && KEEP_TRUNK_ZERO.indexOf(country) === -1) {
           d = cc + d.replace(/^0+/, '');          // national trunk prefix
         } else if (d.slice(0, cc.length) !== cc) {
           d = cc + d;
         }
       }
+    } else if (d.charAt(0) === '0') {
+      return '';                                  // +0... is not a country code
     }
 
     // E.164 is 1–3 digits of country code plus up to 15 total.
@@ -256,7 +348,20 @@
   }
 
   function normPostal(v) {
-    return String(v).trim().toLowerCase().replace(/\s+/g, '');
+    var s = String(v).trim().toLowerCase().replace(/\s+/g, '');
+    if (!s || s.length > 12 || s.indexOf('@') !== -1) return '';
+    return s;
+  }
+
+  // For city and region, which are sent unhashed. Reject anything shaped
+  // like prose or an identifier rather than a place name.
+  function normPlace(v) {
+    var s = normText(v);
+    if (!s || s.length > MAX_PLAIN_LENGTH) return '';
+    if (s.indexOf('@') !== -1) return '';
+    if (s.split(' ').length > 4) return '';
+    if (/\d{4,}/.test(s)) return '';
+    return s;
   }
 
   function normCountry(v) {
@@ -280,6 +385,8 @@
       case 'phone_number': return normPhone(value);
       case 'postal_code':  return normPostal(value);
       case 'country':      return normCountry(value);
+      case 'city':
+      case 'region':       return normPlace(value);
       default:             return normText(value);
     }
   }
@@ -322,17 +429,10 @@
     var name = field.getAttribute && field.getAttribute('name');
     if (!name) return null;
 
-    var key = stripPrefixes(normKey(name));
+    var key = normKey(name);
     if (!key) return null;
 
-    if (FULL_NAME.indexOf(key) !== -1) return 'full_name';
-    for (var canonical in SYNONYMS) {
-      if (SYNONYMS.hasOwnProperty(canonical) &&
-          SYNONYMS[canonical].indexOf(key) !== -1) {
-        return canonical;
-      }
-    }
-    return null;
+    return matchKey(key);
   }
 
   /* ── Form reading ───────────────────────────────────────────────────
@@ -353,19 +453,41 @@
     return form.querySelectorAll('input, select, textarea');
   }
 
+  /*
+    Deliberately no page_path. GTM already exposes {{Page Path}}, and on
+    sites that put identifiers in the URL (/account/<email>/reset,
+    /booking/AB12CD) copying it here would push personal data through the
+    base tag, which carries no consent requirement at all.
+
+    form_id and form_name are page-controlled strings. A templated form
+    title that interpolates a customer name would land here, so keep form
+    titles static.
+  */
   function formDetails(form) {
     return {
       form_id:   form.getAttribute('id') || '',
       form_name: form.getAttribute('data-title') ||
                  form.getAttribute('name') ||
-                 form.getAttribute('id') || 'unnamed_form',
-      page_path: location.pathname
+                 form.getAttribute('id') || 'unnamed_form'
     };
   }
 
+  var COLLECTABLE_TAGS = ['INPUT', 'SELECT', 'TEXTAREA'];
+
   function skipField(field) {
     var type = (field.type || '').toLowerCase();
+    // <output> and <fieldset> are form-associated and appear in
+    // form.elements, but <output> has no `type` and so slips past every
+    // check below while still exposing a string .value.
+    if (COLLECTABLE_TAGS.indexOf(field.tagName) === -1) return true;
     if (field.disabled) return true;
+    // Hidden fields are populated by the site, not the visitor. CRM forms
+    // routinely carry a hidden owner or assigned-rep email, which would
+    // otherwise be hashed and reported as the person who submitted. Use
+    // data-upd to opt a hidden field in deliberately.
+    if (type === 'hidden' && !(field.getAttribute && field.getAttribute('data-upd'))) {
+      return true;
+    }
     if (type === 'password') return true;                    // never, under any name
     if (type === 'submit' || type === 'button' || type === 'reset' ||
         type === 'image'  || type === 'file') return true;
@@ -491,6 +613,15 @@
   if (COLLECT_USER_DATA) {
     STATE.handlers.push(function (form) {
       var details = formDetails(form);
+
+      // Re-checked per submission, not just at install. GTM gated this tag
+      // on the consent that existed when it ran; a visitor who withdrew
+      // consent since then must not have their data read at all.
+      if (!consentGranted()) {
+        log('ad_user_data withdrawn, falling back to base event');
+        return pushAndWait({ event: EVENT_NAME, form_details: details });
+      }
+
       var raw = readUserData(form);
 
       // No matchable fields, so there is nothing to hash, but the
@@ -537,30 +668,89 @@
       return promises;
     };
 
-    // Bubble phase, so validation libraries get to cancel first. A
-    // submission that something else prevents is not a conversion.
-    document.addEventListener('submit', function (e) {
+    /*
+      Bubble phase on window, which runs after every document-level
+      listener whatever order they registered in.
+
+      Listening on document was wrong. Handlers on the same node fire in
+      registration order, so a delegated $(document).on('submit', ...) —
+      the standard WordPress AJAX form pattern, and typically registered
+      from the footer, after the GTM container — called preventDefault()
+      only after this check had already passed. The form then got natively
+      submitted anyway: the site's XHR fired AND the page navigated, so
+      the lead posted twice and the visitor landed somewhere the site
+      never meant to send them.
+
+      The cost of moving to window is that a document-level handler
+      calling stopPropagation() now hides the submission from us
+      completely. Losing a conversion beats breaking a client's form.
+    */
+    window.addEventListener('submit', function (e) {
       if (STATE.resubmitting || e.defaultPrevented) return;
       var form = e.target;
+      if (!form || form.tagName !== 'FORM') return;
+
+      // An impatient second click during the hold would otherwise run the
+      // whole flow again: two conversions, and the submitter's value
+      // appended twice.
+      if (STATE.inFlight.indexOf(form) !== -1) {
+        e.preventDefault();
+        return;
+      }
+
       var promises = collect(form);
       if (!promises.length) return;               // nothing async, let it go
 
       e.preventDefault();
+
+      // Belt and braces for anything listening on window after us: if it
+      // cancels, it still wins.
+      var cancelled = false;
+      try {
+        var nativePreventDefault = e.preventDefault;
+        e.preventDefault = function () {
+          cancelled = true;
+          return nativePreventDefault.apply(e, arguments);
+        };
+      } catch (err) { /* non-extensible event; the window phase covers it */ }
+
+      STATE.inFlight.push(form);
 
       var submitter = e.submitter || null;
       var released = false;
       var release = function () {
         if (released) return;
         released = true;
+
+        var queued = STATE.inFlight.indexOf(form);
+        if (queued !== -1) STATE.inFlight.splice(queued, 1);
+
+        if (cancelled) {
+          log('cancelled by another handler, not resubmitting');
+          return;
+        }
+
+        var hidden = null;
+        var restore = [];
         try {
-          // Carry the clicked button's name/value, which a bare
-          // .submit() would otherwise drop.
-          if (submitter && submitter.name) {
-            var hidden = document.createElement('input');
-            hidden.type = 'hidden';
-            hidden.name = submitter.name;
-            hidden.value = submitter.value || '';
-            form.appendChild(hidden);
+          if (submitter) {
+            // nativeSubmit() has no submitter, so it would otherwise drop
+            // both the button's name/value and its form* overrides. A
+            // button with formaction="/other" posted to the form's own
+            // action instead.
+            if (submitter.name) {
+              hidden = document.createElement('input');
+              hidden.type = 'hidden';
+              hidden.name = submitter.name;
+              hidden.value = submitter.value || '';
+              form.appendChild(hidden);
+            }
+            ['action', 'method', 'target', 'enctype'].forEach(function (attr) {
+              var override = submitter.getAttribute('form' + attr);
+              if (override === null) return;
+              restore.push([attr, form.getAttribute(attr)]);
+              form.setAttribute(attr, override);
+            });
           }
           STATE.resubmitting = true;
           STATE.nativeSubmit.call(form);          // does not re-fire submit
@@ -568,6 +758,14 @@
           log('resubmit failed', err);
         } finally {
           STATE.resubmitting = false;
+          // The form data set is built synchronously by submit(), so this
+          // is safe here and stops the injected input accumulating on a
+          // form that does not navigate away.
+          if (hidden && hidden.parentNode) hidden.parentNode.removeChild(hidden);
+          restore.forEach(function (pair) {
+            if (pair[1] === null) form.removeAttribute(pair[0]);
+            else form.setAttribute(pair[0], pair[1]);
+          });
         }
       };
 
@@ -582,14 +780,19 @@
       var native = function () { return STATE.nativeSubmit.apply(form, args); };
 
       if (STATE.resubmitting) return native();
+      if (STATE.inFlight.indexOf(form) !== -1) return;   // already held
 
       var promises = collect(form);
       if (!promises.length) return native();
+
+      STATE.inFlight.push(form);
 
       var released = false;
       var release = function () {
         if (released) return;
         released = true;
+        var queued = STATE.inFlight.indexOf(form);
+        if (queued !== -1) STATE.inFlight.splice(queued, 1);
         STATE.resubmitting = true;
         try { native(); } catch (err) { log('submit failed', err); }
         finally { STATE.resubmitting = false; }
