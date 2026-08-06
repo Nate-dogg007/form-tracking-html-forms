@@ -2,11 +2,13 @@
 /*
   ░▒▓█ HTML Form Tracking → Google Ads Enhanced Conversions █▓▒░
   Author:  Nathan O'Connor
-  Version: 1.2
+  Version: 1.3
 
   ─────────────────────────────────────────────────────────────
   WHAT THIS DOES
-    • Captures native HTML form submissions (event + programmatic .submit()).
+    • Captures form submissions a VISITOR made — native, AJAX-handled, and
+      programmatic .submit(). Forms submitted by other tags on the page are
+      ignored; see isVisitorForm() for why that needs saying.
     • Extracts ONLY Google's user-provided-data fields. Everything else —
       message boxes, free text, unrecognised inputs — is discarded.
     • Normalises to Google's spec, SHA-256 hashes the fields Google wants
@@ -63,6 +65,21 @@
   // site with no Consent Mode v2 will still collect, so only do that if
   // you have another lawful basis and know what it is.
   var REQUIRE_EXPLICIT_CONSENT = true;
+
+  // Report forms the site cancels and posts over XHR itself — the normal
+  // shape of a WordPress form plugin. Leave this on: with it off, a site
+  // whose forms are all AJAX reports nothing at all, which is what v1.2 did.
+  //
+  // The trade-off, stated plainly: this fires when the submission is
+  // ATTEMPTED. A script that cancels the submit because its own validation
+  // failed looks identical from here to one that cancels in order to post,
+  // so a form validated in JavaScript rather than by the browser can report a
+  // submission that never went anywhere. Native HTML5 validation is not
+  // affected — it stops the submit event before anything here runs.
+  //
+  // Turn this off only if you know the site validates in JS and you would
+  // rather under-count than over-count.
+  var REPORT_AJAX_SUBMISSIONS = true;
 
   // Hard cap on how long a submission is held while hashing + tag firing
   // complete. The form always submits, timeout or not.
@@ -215,11 +232,17 @@
   if (!STATE || typeof STATE !== 'object' || !(STATE.handlers instanceof Array)) {
     STATE = window.__formTracking = {
       installed: false, hooked: false, handlers: [],
-      resubmitting: false, inFlight: []
+      resubmitting: false, inFlight: [], reported: []
     };
   }
 
   if (!(STATE.inFlight instanceof Array)) STATE.inFlight = [];
+  // Deliberately NOT inFlight. That list means "this form is being held and
+  // will be resubmitted", and the programmatic .submit() hook reads it as a
+  // reason to swallow a call. A form reported on the AJAX path is not held by
+  // anything, so reusing the list there would silently block a later
+  // .submit() the site actually meant.
+  if (!(STATE.reported instanceof Array)) STATE.reported = [];
 
   if (STATE.installed) {
     log('already installed, skipping');
@@ -569,6 +592,93 @@
     return false;
   }
 
+  /*
+    Did a visitor submit this, or did a tag?
+
+    Third-party tags submit hidden forms as a transport. The Meta Pixel builds
+
+      <form action="https://www.facebook.com/tr/" target="fb0542…">
+        <iframe src="about:blank" name="fb0542…"></iframe>
+      </form>
+
+    appends it to the page and calls .submit() on it. Because the hook below
+    patches HTMLFormElement.prototype globally, every one of those arrived here
+    as a conversion. Measured on a live site: clicking "Next" in a five-step
+    quote form reported a lead on each step, because the pixel fired on the
+    interaction — the form itself was never submitted at all. Google's own
+    gtag does the same thing.
+
+    The test is structural, not a list of pixel hostnames. A denylist is only
+    ever the set of tags someone knew about on the day it was written, and the
+    failure it allows is silent: a conversion count that looks healthy.
+
+    What separates the two is that a visitor can only fill in a form that was
+    put in front of them. A transport form is never rendered.
+
+    The obvious test — "does it carry any non-hidden controls" — is not enough,
+    and measuring beat guessing here. The pixel's form on that live site holds
+    SIXTY-SEVEN inputs (id, ev, dl, rl, ts, sw, sh …), none of them declaring a
+    type attribute, so .type reports "text" for every one and a type-based
+    check waves the whole thing through. What is true of all 67 is that not one
+    has ever been painted.
+
+    So the test is layout: the form must occupy space on the page. That also
+    survives the common pattern of a checkbox hidden with CSS and styled
+    through its label, which a per-control visibility test would reject.
+  */
+  function isRendered(el) {
+    if (!el || !el.getBoundingClientRect) return true;   // cannot tell; don't punish it
+    var box = el.getBoundingClientRect();
+    return !!(box.width || box.height);
+  }
+
+  function isVisitorForm(form) {
+    if (!form || form.tagName !== 'FORM') return false;
+
+    // Built by script and never in the page.
+    if (form.isConnected === false) return false;
+
+    // Never painted, so nobody filled it in.
+    if (!isRendered(form)) return false;
+
+    var els = formElements(form);
+    if (!els || typeof els.length !== 'number') return false;
+
+    for (var i = 0; i < els.length; i++) {
+      var field = els[i];
+      if (!field || COLLECTABLE_TAGS.indexOf(field.tagName) === -1) continue;
+      if (field.disabled) continue;
+      var type = (field.type || '').toLowerCase();
+      // Hidden fields are page-controlled and buttons are not filled in, so
+      // neither is evidence that a person was involved.
+      if (type === 'hidden' || type === 'submit' || type === 'button' ||
+          type === 'reset'  || type === 'image') continue;
+      return true;
+    }
+    return false;
+  }
+
+  /*
+    The verdict has to be taken before any other handler runs.
+
+    This tag listens at window in the bubble phase, which is deliberate (see
+    the hook below) but means the site's own submit handler has already run by
+    the time we look. A handler that hides the form on submit — closing a modal,
+    swapping in a spinner — would leave us measuring a form that is no longer
+    rendered and calling a real lead a pixel. So the judgement is made in the
+    capture phase, which runs before every handler on the way down, and the
+    bubble phase reads it back.
+
+    One slot is enough: a submit event is dispatched and handled to completion
+    before the next one begins.
+  */
+  var captured = { form: null, visitor: false };
+
+  function visitorVerdict(form) {
+    if (captured.form === form) return captured.visitor;
+    return isVisitorForm(form);
+  }
+
   // Returns a map of canonical key → normalised value, or null.
   function readUserData(form) {
     var els = formElements(form);
@@ -713,6 +823,12 @@
     var collect = function (form) {
       if (!form || form.tagName !== 'FORM') return [];
       if (form.hasAttribute && form.hasAttribute('data-no-track')) return [];
+      // Gated here rather than at each hook, so the submit-event path and the
+      // programmatic .submit() path cannot drift apart.
+      if (!visitorVerdict(form)) {
+        log('not a visitor-submitted form, ignoring');
+        return [];
+      }
       var promises = [];
       for (var i = 0; i < STATE.handlers.length; i++) {
         try {
@@ -742,10 +858,75 @@
       calling stopPropagation() now hides the submission from us
       completely. Losing a conversion beats breaking a client's form.
     */
+    /*
+      Capture phase, so this runs before any handler the site registered —
+      including one that hides the form while it submits. It only records a
+      verdict; every decision still happens in the bubble listener below.
+    */
     window.addEventListener('submit', function (e) {
-      if (STATE.resubmitting || e.defaultPrevented) return;
       var form = e.target;
       if (!form || form.tagName !== 'FORM') return;
+      captured.form = form;
+      captured.visitor = isVisitorForm(form);
+    }, true);
+
+    window.addEventListener('submit', function (e) {
+      if (STATE.resubmitting) return;
+      var form = e.target;
+      if (!form || form.tagName !== 'FORM') return;
+
+      /*
+        The site has already cancelled the native submission, so it is posting
+        the form over XHR itself. That is the ordinary shape of a WordPress
+        form plugin, and it used to mean the submission was invisible here:
+        this listener runs at window, after the document-level handler that
+        cancelled it, and an early return on defaultPrevented threw the event
+        away.
+
+        Measured on a live site running the HTML Forms plugin, which cancels at
+        document and posts to admin-ajax: every real lead went unreported,
+        while the Meta Pixel's transport form was counted instead. The two
+        faults hid each other — the conversion count looked plausible.
+
+        So report it, and touch nothing else: no preventDefault, no hold, no
+        resubmit. Whatever the site decided stands. Values are read
+        synchronously inside collect(), before the site's XHR has started, so a
+        form that empties itself on success still yields its data.
+
+        This reports the submission being ATTEMPTED. A form posting over XHR
+        can still be refused by the server, and nothing available here would
+        say so. Where a form plugin publishes its own success event, committing
+        on that is the stronger contract — which is what the plugin-specific
+        builds in this family do.
+      */
+      if (e.defaultPrevented) {
+        if (!REPORT_AJAX_SUBMISSIONS) return;
+
+        /*
+          Double-click guard. An XHR form stays on the page, so an impatient
+          visitor can submit it again a moment later; without this that is a
+          second conversion for one enquiry.
+
+          The window is fixed rather than tied to when the push resolves. Tying
+          it to the push clears in ~10ms once GTM calls back, which is shorter
+          than the gap between two human clicks, so it guarded nothing — the
+          test caught exactly that.
+
+          A repeat after the window IS reported, deliberately. By then the site
+          has genuinely posted twice and the tag should say so rather than
+          decide on the site's behalf which submissions were real.
+        */
+        if (STATE.reported.indexOf(form) !== -1) return;
+
+        if (!collect(form).length) return;
+
+        STATE.reported.push(form);
+        setTimeout(function () {
+          var seen = STATE.reported.indexOf(form);
+          if (seen !== -1) STATE.reported.splice(seen, 1);
+        }, MAX_DELAY_MS);
+        return;
+      }
 
       // An impatient second click during the hold would otherwise run the
       // whole flow again: two conversions, and the submitter's value

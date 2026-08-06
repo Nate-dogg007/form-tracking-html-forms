@@ -1,11 +1,33 @@
 # HTML form tracking for Google Ads enhanced conversions
 
 Author: Nathan O'Connor
-Version: 1.2
+Version: 1.3
 
-Captures native HTML form submissions, normalises and SHA-256 hashes the user-provided data
+Captures form submissions a visitor made, normalises and SHA-256 hashes the user-provided data
 fields Google Ads wants, and pushes one `html_form_submit` event to the dataLayer. Personal data is
 only ever read once your CMP has granted `ad_user_data`, re-checked on every submission.
+
+## If you are on 1.2, upgrade
+
+1.2 could report the wrong thing in both directions, and on the site this was found on it was doing
+both at once — which is why the conversion count looked plausible. Paste 1.3 over the tag; there is
+nothing else to change.
+
+**It counted other tags' form submissions as leads.** The Meta Pixel sends its events by building a
+hidden form, appending it to the page and calling `.submit()` on it. 1.2 patched
+`HTMLFormElement.prototype.submit` globally, so every one of those arrived as a conversion. On a
+five-step quote form that meant a lead reported on each step, from a visitor who had filled in
+nothing. Google's own gtag does the same thing.
+
+The fix ignores forms that were never rendered. Worth knowing why the obvious version of that check
+is not enough: the pixel's form carries **67 inputs**, none of which declare a `type` attribute, so
+`.type` reports `"text"` for all of them and any test based on field types lets the whole thing
+through. What is actually true of them is that nobody ever saw them.
+
+**And it reported nothing at all for AJAX forms.** If a script cancels the native submission to post
+the form itself — Contact Form 7, Gravity Forms, HTML Forms, most WordPress form plugins — 1.2 saw
+`defaultPrevented` and threw the event away. Those are now reported. See `REPORT_AJAX_SUBMISSIONS`
+in the config block for the one trade-off that carries.
 
 **Install is one GTM Custom HTML tag.** Paste the file in, set one country code, trigger on All
 Pages. Nothing to toggle.
@@ -378,17 +400,41 @@ npm install playwright
 node test/form-tracking.test.mjs
 ```
 
-108 assertions. Run it after editing the
+126 assertions. Run it after editing the
 script. It has caught every real defect found in this rewrite so far, including the two most
 serious: the script overriding another handler's `preventDefault()` and force-submitting a form
 the site had cancelled, and personal data still being collected after consent was withdrawn.
 
+There is also a check that runs the tag against a **real site** in a real browser:
+
+```bash
+node test/live-site-check.mjs https://example.com/
+```
+
+Read the header of that file before running it. It is headed on purpose, it aborts the form's POST
+so no enquiry is ever sent, and if you point it at a site whose form posts somewhere other than
+`admin-ajax.php` you must update that route first or you will send real enquiries.
+
+Keep both. The fixture suite is fast and runs anywhere; the live check exists because the first
+version of the 1.3 guard passed every fixture and still failed on the real page. A fixture written
+from the implementation only ever tests the implementation.
+
 ## Requirements and limits
 
-- Standard HTML form submissions. AJAX and JavaScript-rendered forms are not tracked: the script
-  sees the cancellation and stands down, so they keep working normally but produce no event. Use the
-  Ninja Forms or Gravity Forms scripts instead. Those are still on the older approach and carry
-  the phone and postcode problems described above until they are updated.
+- Native and AJAX form submissions both. A form the site cancels and posts itself is reported and
+  otherwise left alone — no hold, no resubmit, whatever the site decided stands. Two things follow
+  from that. It reports the submission being **attempted**, so a post the server then refuses is
+  still counted; and a script that cancels because its own JavaScript validation failed is
+  indistinguishable from one that cancels in order to post, so a JS-validated form can report a
+  submission that never went anywhere. Native HTML5 validation is unaffected — it stops the event
+  before the tag runs. Set `REPORT_AJAX_SUBMISSIONS = false` to opt out and under-count instead.
+- Where a form plugin publishes its own success event, committing on that is a stronger contract
+  than either of the above, because it fires only once the server has accepted the submission. The
+  Contact Form 7, Gravity Forms, Ninja Forms and Elementor scripts in this family do that. Prefer
+  the specific script over this one when the site runs a plugin that has one.
+- Forms submitted by other tags on the page are ignored. The Meta Pixel and Google's gtag both send
+  data by submitting hidden forms; those are not conversions. The test is whether the form was ever
+  rendered, so a form built and posted by script without being shown produces no event.
 - HTTPS. `crypto.subtle` only exists in a secure context, so on plain HTTP the tag still reports
   submissions but never attaches `user_data`.
 - Inputs need a `name` attribute or a `data-upd` attribute.
