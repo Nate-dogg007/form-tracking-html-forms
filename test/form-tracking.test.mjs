@@ -1,5 +1,5 @@
 /*
-  End-to-end tests for html-forms v1.2.
+  End-to-end tests for html-forms v1.3.
   Runs the real script in real Chromium against real forms.
 
     npm install playwright   (or use a global install via NODE_PATH)
@@ -125,6 +125,95 @@ const PAGES = {
         window.__ajaxFired++;
         e.preventDefault();
       });
+    </script>`),
+
+  /*
+    The Meta Pixel's transport form, copied off a live site
+    (doormaticgaragedoors.co.uk, 2026-08-06). fbevents.js appends this to the
+    page and calls .submit() on it whenever it sends an event. Because the tag
+    patches HTMLFormElement.prototype globally, every one of these was counted
+    as a conversion — on that site once per step of a five-step quote form,
+    while the real form went unreported. Google's gtag does the same thing.
+  */
+  '/pixel-transport': page(`
+    <form id="real" action="/thanks" method="get">
+      <input name="email" value="visitor@example.com">
+      <button type="submit">Send</button>
+    </form>
+    <script>
+      // Reproduced from the live form, including the detail that broke the
+      // first attempt at the fix: fbevents appends dozens of inputs that
+      // declare NO type attribute, so .type reports "text" for every one and
+      // a type-based check lets the whole form through. The real one carried
+      // 67. What is actually true of them is that none is ever painted.
+      window.__firePixel = function () {
+        var f = document.createElement('form');
+        f.method = 'post';
+        f.action = 'https://www.facebook.com/tr/';
+        f.target = 'fb05424274817341537';
+        f.setAttribute('accept-charset', 'utf-8');
+        f.style.display = 'none';
+        var i = document.createElement('iframe');
+        i.src = 'about:blank';
+        i.name = 'fb05424274817341537';
+        f.appendChild(i);
+        ['id','ev','dl','rl','if','ts','iw','sw','sh','v','r','ec','o','it','coo','es','tm','exp']
+          .forEach(function (n) {
+            var inp = document.createElement('input');   // deliberately no type
+            inp.name = n;
+            inp.value = '1';
+            f.appendChild(inp);
+          });
+        document.body.appendChild(f);
+        f.submit();
+      };
+    </script>`),
+
+  // A real form the site hides the moment it is submitted — a modal closing,
+  // a spinner swapping in. The verdict has to be taken in the capture phase or
+  // this reads as an unrendered form and the lead is thrown away.
+  '/hides-on-submit': page(`
+    <form id="modal" class="hf-form" action="/thanks" method="get">
+      <input name="email" value="hidden.form@example.com">
+      <button type="submit">Send</button>
+    </form>
+    <script>
+      document.addEventListener('submit', function (e) {
+        e.preventDefault();
+        e.target.style.display = 'none';
+      }, false);
+    </script>`),
+
+  // A transport form carrying hidden fields rather than an iframe — the shape
+  // Google's conversion tags use. Hidden fields are page-controlled, so they
+  // are not evidence a person was involved either.
+  '/hidden-only-transport': page(`
+    <form id="ht" action="/thanks" method="get">
+      <input type="hidden" name="email" value="pixel@example.com">
+      <input type="hidden" name="token" value="abc">
+    </form>`),
+
+  /*
+    An AJAX form shaped like the HTML Forms WordPress plugin: a document-level
+    bubble listener that cancels and posts over XHR, registered after the tag,
+    then resets the form. Reproduced from that plugin's public.js.
+  */
+  '/ajax-plugin': page(`
+    <form id="ajax" class="hf-form" action="/thanks" method="get">
+      <input name="your-email" value="Lead.Person@gmail.com">
+      <input name="your-phone" value="07700 900123">
+      <input name="your-name"  value="Lead Person">
+      <textarea name="message">please quote me</textarea>
+      <button type="submit">Send your request</button>
+    </form>
+    <script>
+      window.__xhrFired = 0;
+      document.addEventListener('submit', function (e) {
+        if (e.target.className.indexOf('hf-form') < 0) return;
+        e.preventDefault();
+        window.__xhrFired++;
+        setTimeout(function () { e.target.reset(); }, 20);
+      }, false);
     </script>`),
 
   '/formaction': page(`
@@ -429,10 +518,14 @@ console.log('\nnot overriding another script’s cancellation');
   const { submissions, url } = await run('/delegated-cancel', 1);
   check('delegated preventDefault is respected: no navigation',
     !url.includes('/thanks'), url);
-  check('delegated preventDefault is respected: no conversion',
-    submissions.length === 0, JSON.stringify(submissions));
   check('form contents never reach a URL',
     !url.includes('wp%40example.com') && !url.includes('secret'), url);
+  // Changed in 1.3. Up to 1.2 this asserted NO conversion, which is how the
+  // AJAX blind spot got enshrined: respecting the cancellation was conflated
+  // with staying silent about it. Reporting and not-interfering are separate
+  // things, and only the second one was ever the requirement.
+  check('cancelled submission IS reported',
+    submissions.length === 1, JSON.stringify(submissions));
 }
 {
   // Same check for the base tag, which the README calls personal-data-free.
@@ -726,9 +819,101 @@ console.log('\ndata-upd mapping and opt-outs');
 console.log('\ncancelled submissions');
 {
   const { submissions, url } = await run('/cancelled', 1);
-  check('preventDefault by another handler = no conversion',
-    submissions.length === 0, JSON.stringify(submissions));
+  check('preventDefault by a handler on the form is still reported',
+    submissions.length === 1, JSON.stringify(submissions));
   check('page did not navigate', !url.includes('/thanks'), url);
+}
+
+console.log('\nforms submitted by other tags, not by a visitor');
+{
+  // The bug this release exists for. Nothing about the pixel's form involves
+  // a person, and it must not produce a conversion.
+  const { submissions } = await run('/pixel-transport', 1, async (p) => {
+    await p.evaluate(() => window.__firePixel());
+    await p.evaluate(() => window.__firePixel());
+    await p.waitForTimeout(200);
+  });
+  check('Meta Pixel transport form is not a conversion',
+    submissions.length === 0, JSON.stringify(submissions));
+}
+{
+  // ...and the real form on the same page still is, so the guard is not
+  // simply switching everything off.
+  const { submissions, url } = await run('/pixel-transport', 1, async (p) => {
+    await p.evaluate(() => window.__firePixel());
+    await p.click('button[type=submit]');
+  });
+  check('the real form on that page still reports',
+    submissions.length === 1, JSON.stringify(submissions));
+  check('and reports the visitor, not the pixel',
+    submissions[0]?.user_data?.sha256_email_address === sha256('visitor@example.com'),
+    JSON.stringify(submissions));
+  check('the real form still submits', url.includes('/thanks'), url);
+}
+{
+  const { submissions } = await run('/hidden-only-transport', 1, async (p) => {
+    await p.evaluate(() => document.getElementById('ht').submit());
+    await p.waitForTimeout(200);
+  });
+  check('a hidden-fields-only transport form is not a conversion',
+    submissions.length === 0, JSON.stringify(submissions));
+}
+{
+  // The other direction: the guard must not throw away a real lead just
+  // because the site hides the form while submitting it.
+  const { submissions } = await run('/hides-on-submit', 1, async (p) => {
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(300);
+  });
+  check('a form the site hides on submit is still a conversion',
+    submissions.length === 1, JSON.stringify(submissions));
+  check('and it still carries the visitor’s data',
+    submissions[0]?.user_data?.sha256_email_address === sha256('hidden.form@example.com'),
+    JSON.stringify(submissions));
+}
+
+console.log('\nAJAX forms (the WordPress plugin shape)');
+{
+  const { submissions, url } = await run('/ajax-plugin', 1, async (p) => {
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(300);
+  });
+  const ud = submissions[0]?.user_data || {};
+  check('an AJAX submission is reported at all',
+    submissions.length === 1, JSON.stringify(submissions));
+  check('reported exactly once, not once per handler',
+    submissions.filter((s) => s.event === EVENT_NAME).length === 1);
+  check('values are read before the plugin resets the form',
+    ud.sha256_email_address === sha256('leadperson@gmail.com'),
+    JSON.stringify(ud));
+  check('phone still normalised on the AJAX path',
+    ud.sha256_phone_number === sha256('+447700900123'), JSON.stringify(ud));
+  check('free-text message still dropped',
+    !JSON.stringify(submissions).includes('quote me'), JSON.stringify(submissions));
+  check('the page does not navigate — the site keeps control',
+    !url.includes('/thanks'), url);
+}
+{
+  // The site's own XHR must fire exactly once. Firing it twice was the 1.1
+  // incident that moved this listener to window in the first place.
+  const { records } = await run('/ajax-plugin', 1, async (p) => {
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(300);
+    const fired = await p.evaluate(() => window.__xhrFired);
+    await p.evaluate((n) => window.__record({ event: 'xhr-count', n }), fired);
+  });
+  const counted = records.find((r) => r.event === 'xhr-count');
+  check('the site’s own XHR fired exactly once', counted?.n === 1, JSON.stringify(counted));
+}
+{
+  // An impatient second click must not buy a second conversion.
+  const { submissions } = await run('/ajax-plugin', 1, async (p) => {
+    await p.click('button[type=submit]');
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(300);
+  });
+  check('double-click on an AJAX form is still one conversion',
+    submissions.length === 1, `got ${submissions.length}`);
 }
 
 console.log('\nprogrammatic form.submit()');
