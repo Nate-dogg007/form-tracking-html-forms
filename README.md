@@ -219,11 +219,54 @@ and name only. Someone who withdraws consent halfway through a session stops bei
 immediately, rather than at their next page load.
 
 **An unreadable signal is a denial.** A grant has to be positive and unambiguous. An unreadable
-shape, a dataLayer that has been reset, a `default` arriving after an `update`, a region-scoped
-entry for somewhere else: all of those resolve to denied, not granted. An earlier draft defaulted
-to granted on anything it could not read, which meant a CMP whose updates never reached the
-dataLayer in the expected shape looked exactly like consent. A control that fails open while its
-documentation says it fails closed is worse than no control at all.
+shape, a dataLayer that has been reset, a `default` arriving after an `update`: all of those
+resolve to denied, not granted. An earlier draft defaulted to granted on anything it could not
+read, which meant a CMP whose updates never reached the dataLayer in the expected shape looked
+exactly like consent. A control that fails open while its documentation says it fails closed is
+worse than no control at all.
+
+### Regional defaults cannot be resolved here
+
+The standard Consent Mode v2 setup is a restrictive default for a list of regions plus a permissive
+global fallback for everyone else:
+
+```js
+gtag('consent', 'default', { ad_user_data: 'denied',  region: ['GB','ES', /* … */] });
+gtag('consent', 'default', { ad_user_data: 'granted' });
+```
+
+Which of those applies depends on where the visitor is, and **this code runs in a browser that is
+not told**. Up to 1.4 it skipped region-scoped entries as "probably somewhere else" and read the
+fallback — so a visitor inside a denied region who never touched the banner had their hashed email
+pushed to the dataLayer and reported as a clean success.
+
+Guessing has no safe direction: read the fallback and you over-collect, ignore it and you
+under-collect. So it now reports neither, as `region_unresolved`, and `CONSENT_MODE` decides what
+that silence means exactly as it does elsewhere.
+
+**Anyone who answers the banner is unaffected.** Accept or reject, their CMP pushes a global
+`update`, and that resolves the question whatever the regional defaults said. The cost falls only
+on people who never engage with the banner at all, and only on sites using regional defaults.
+
+**Know the size of that before you accept it.** Didomi's January 2026 benchmark, drawn from
+hundreds of millions of European consent interactions during 2025, puts the no-choice rate — people
+who neither accept nor reject — at
+[21.7% to 27.4%](https://www.didomi.io/blog/benchmark-average-consent-rate-europe) depending on
+region, and higher in some industries. So on a site with regional defaults, expect roughly a fifth
+to a quarter of visitors to produce no enhanced-conversions match until they answer.
+
+That is the price of not guessing. The thing it buys is that the other direction — reading the
+global fallback and hoping — pushed hashed emails into a page-global array for people whose own
+regional default said no.
+
+If the cost is too high for a given site, `window.formTrackingConsentFn` is the way out — your CMP
+knows the visitor's region and this script does not, so let it answer:
+
+```js
+window.formTrackingConsentFn = function () {
+  return myCmp.getConsent('advertising') === true;   // whatever your CMP exposes
+};
+```
 
 ### The one case you have to decide: no signal at all
 
@@ -291,6 +334,7 @@ about ninety days late.
 | `collected_undeclared` | `user_data` attached because `CONSENT_MODE = 'none'` |
 | `consent_denied` | A signal said no |
 | `no_consent_signal` | `CONSENT_MODE = 'cmp'`, and nothing emitted a signal |
+| `region_unresolved` | Consent is configured per region, which a browser cannot resolve |
 | `no_fields` | Consent fine, nothing on the form to match on |
 | `no_crypto` | No SubtleCrypto, so not a secure context |
 | `error` | Hashing or assembly threw |
