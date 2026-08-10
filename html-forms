@@ -370,6 +370,24 @@
 
   var warnedNoConsentSignal = false;
   var warnedCmpContradiction = false;
+  var warnedBadConsentMode = false;
+
+  /*
+    Anything that is not exactly 'none' falls through to the fail-closed
+    branch, which is the safe direction but a baffling one to debug: someone
+    who typed 'None' gets told to set CONSENT_MODE = "none", which is what
+    they believe they did. Say so plainly instead.
+  */
+  function consentModeIsNone() {
+    if (CONSENT_MODE === 'none') return true;
+    if (CONSENT_MODE !== 'cmp') {
+      warnedBadConsentMode = warnOnce(warnedBadConsentMode,
+        'CONSENT_MODE is ' + JSON.stringify(CONSENT_MODE) + ', which is neither ' +
+        '"cmp" nor "none". Treating it as "cmp", so no user data will be ' +
+        'collected without a consent signal. Check for a typo or stray whitespace.');
+    }
+    return false;
+  }
 
   // Deliberately not behind DEBUG. Silence in either of these cases looks
   // identical to "enhanced conversions is working", which is the failure
@@ -459,7 +477,7 @@
     // so look either way — it just means different things in each.
     var cmp = detectCmp();
 
-    if (CONSENT_MODE === 'none') {
+    if (consentModeIsNone()) {
       if (cmp) {
         warnedCmpContradiction = warnOnce(warnedCmpContradiction,
           'CONSENT_MODE is "none" but ' + cmp + ' is on this page. User data ' +

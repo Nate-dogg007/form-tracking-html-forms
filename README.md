@@ -238,6 +238,10 @@ So you declare which one it is, with `CONSENT_MODE` in the config block:
 says no; the declaration only ever governs the silence. That is what makes `'none'` safe to leave
 set on a site that later acquires a banner.
 
+Anything that is not exactly `'none'` — `'None'`, `'none '`, a stray typo — falls through to the
+fail-closed branch and says so by name in the console, rather than telling you to set the value you
+think you already set.
+
 Getting this wrong in the `'none'` direction, on a site that does have a banner, means collecting
 from people who declined. So the script also fingerprints the common CMPs — CookieYes, OneTrust,
 Cookiebot, HubSpot, Complianz, Termly, Iubenda, Usercentrics, Osano, IAB TCF — and reports what it

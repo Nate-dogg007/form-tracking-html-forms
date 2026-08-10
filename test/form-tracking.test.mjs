@@ -998,14 +998,21 @@ console.log('\nuser_data_status says why');
   // The invariant the whole design rests on: the conversion is never what
   // gets gated. Anything that suppresses the event is a bug, not a stricter
   // reading of consent.
+  const deny = async (p) => {
+    await p.evaluate(() => window.dataLayer.push(
+      ['consent', 'update', { ad_user_data: 'denied' }]));
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  };
   const cases = [
-    ['granted',        { }],
-    ['denied',         { consent: 'none' }],
-    ['no signal, cmp', { consent: 'none' }],
-    ['no signal, none',{ consent: 'none', consentMode: 'none' }]
+    ['granted',         null,  { }],
+    ['denied',          deny,  { consent: 'none' }],
+    ['denied, mode none', deny, { consent: 'none', consentMode: 'none' }],
+    ['no signal, cmp',  null,  { consent: 'none' }],
+    ['no signal, none', null,  { consent: 'none', consentMode: 'none' }]
   ];
-  for (const [label, opts] of cases) {
-    const { submissions } = await run('/consent', 1, null, opts);
+  for (const [label, act, opts] of cases) {
+    const { submissions } = await run('/consent', 1, act, opts);
     check(`event still fires: ${label}`, submissions.length === 1,
       `got ${submissions.length}`);
   }
@@ -1046,6 +1053,23 @@ console.log('\nCMP detection contradicts the declaration, never decides it');
   const { submissions } = await run('/consent', 1, null, { consent: 'none' });
   check('no CMP on the page adds no cmp_detected key',
     !('cmp_detected' in (submissions[0] || {})), submissions[0]?.cmp_detected);
+}
+{
+  // A typo falls through to fail-closed, which is the safe direction but a
+  // baffling one: the warning used to tell you to set CONSENT_MODE = "none",
+  // which is exactly what you believe you did.
+  const warnings = [];
+  const { submissions } = await run('/consent', 1, async (p) => {
+    p.on('console', (m) => { if (m.type() === 'warning') warnings.push(m.text()); });
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none', consentMode: 'None' });
+  check('a mis-cased CONSENT_MODE fails closed, not open',
+    submissions[0]?.user_data_status === 'no_consent_signal' && !submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+  check('and says the value is the problem, rather than repeating the advice',
+    warnings.some((w) => w.includes('"None"') && w.includes('neither')),
+    warnings.join(' | '));
 }
 {
   // A CMP that throws when probed must not take the submission down with it.
