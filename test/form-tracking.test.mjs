@@ -289,10 +289,17 @@ const PAGES = {
       <button type="submit">Send</button>
     </form>`),
 
+  // form_name comes FIRST and a real name second, so "first match wins"
+  // means a broken NEVER_MATCH guard would hash the form's title instead of
+  // the visitor. The address is complete on purpose — without it the block
+  // is withheld and the assertion has nothing to inspect.
   '/form-name': page(`
     <form id="fn" action="/thanks" method="get">
       <input type="text" name="form_name" value="Contact Enquiry Form">
-      <input name="email" value="fn@example.com">
+      <input name="name"     value="Rita Skeeter">
+      <input name="email"    value="fn@example.com">
+      <input name="postcode" value="SO99 9XX">
+      <input name="country"  value="GB">
       <button type="submit">Send</button>
     </form>`),
 
@@ -371,6 +378,36 @@ const PAGES = {
       <input name="last_name"  value="Only">
       <input name="postcode"   value="SO99 9XX">
       <input name="country"    value="United Kingdom">
+      <button type="submit">Send</button>
+    </form>`),
+
+  // Each of the four required address fields, missing one at a time. Only
+  // country and postcode were isolated before, so dropping the first_name or
+  // last_name clause from the completeness test changed nothing.
+  '/no-first-name': page(`
+    <form id="nf" action="/thanks" method="get">
+      <input name="last_name" value="Smith">
+      <input name="postcode"  value="SO99 9XX">
+      <input name="country"   value="GB">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/no-last-name': page(`
+    <form id="nl" action="/thanks" method="get">
+      <input name="first_name" value="Jane">
+      <input name="postcode"   value="SO99 9XX">
+      <input name="country"    value="GB">
+      <button type="submit">Send</button>
+    </form>`),
+
+  // A country the alias table does not carry. The visitor answered; we just
+  // could not read it. That is not the same as not asking.
+  '/unrecognised-country': page(`
+    <form id="uc" action="/thanks" method="get">
+      <input name="first_name" value="Nikos">
+      <input name="last_name"  value="Papadopoulos">
+      <input name="postcode"   value="10431">
+      <select name="country"><option value="Greece" selected>Greece</option></select>
       <button type="submit">Send</button>
     </form>`),
 
@@ -947,13 +984,19 @@ console.log('\nplace fields require an explicit opt-in');
   // form_name carries the form's title on several WP plugins. Splitting it
   // into first/last poisons the match data with something not a person.
   const { submissions } = await run('/form-name', 1);
-  // Asserted against the whole payload, not the address block: with no
-  // postcode or country on this form the block is dropped entirely now, so
-  // checking its keys would pass for the wrong reason.
-  const blob = JSON.stringify(submissions);
+  const addr = submissions[0]?.user_data?.address || {};
+  /*
+    Asserted positively — that first/last are the REAL visitor's — rather
+    than by the absence of the form title's hash. An earlier version checked
+    the whole payload for those hashes, which could never fail: the fixture
+    had no postcode or country, so the address block was withheld and there
+    was nothing for a leak to appear in.
+  */
   check('form_name is never read as the visitor’s name',
-    !['contact', 'enquiry', 'form', 'contact enquiry form']
-      .some((t) => blob.includes(sha256(t))), blob.slice(0, 300));
+    addr.sha256_first_name === sha256('rita') &&
+    addr.sha256_last_name === sha256('skeeter'), JSON.stringify(addr));
+  check('and the form title appears nowhere in the payload',
+    !['contact', 'enquiry', 'form'].some((t) => JSON.stringify(submissions).includes(sha256(t))));
   check('the real name field still works', 
     submissions[0]?.user_data?.sha256_email_address === sha256('fn@example.com'));
 }
@@ -1466,6 +1509,41 @@ console.log('\nthe address block is all four fields or none');
     !!ud.address && ud.address.country === 'GB', JSON.stringify(ud));
   check("and it reports 'collected', not 'no_fields'",
     submissions[0]?.user_data_status === 'collected', submissions[0]?.user_data_status);
+}
+
+
+{
+  const { submissions } = await run('/no-first-name', 1);
+  check('a missing first name withholds the address',
+    !submissions[0]?.user_data?.address,
+    JSON.stringify(submissions[0]?.user_data?.address));
+}
+{
+  const { submissions } = await run('/no-last-name', 1);
+  check('a missing last name withholds it too',
+    !submissions[0]?.user_data?.address,
+    JSON.stringify(submissions[0]?.user_data?.address));
+}
+{
+  /*
+    The one that matters most. A visitor who ANSWERED the country question
+    must never have that answer replaced by the site default, even when the
+    answer is one the alias table cannot read — otherwise their hashed name
+    and real postcode go out attached to a country they have never been to,
+    which cannot match and is exactly the disclosure this rule exists to stop.
+  */
+  const { submissions } = await run('/unrecognised-country', 1, null,
+    { assumeCountry: true });
+  check('an unreadable country answer is not overwritten with the default',
+    !submissions[0]?.user_data?.address,
+    JSON.stringify(submissions[0]?.user_data?.address));
+}
+{
+  // ...while a form that never asked is still filled, which is the point.
+  const { submissions } = await run('/no-country', 1, null, { assumeCountry: true });
+  check('a form that never asked for country is still completed',
+    submissions[0]?.user_data?.address?.country === 'GB',
+    JSON.stringify(submissions[0]?.user_data?.address));
 }
 
 /* ── Result ──────────────────────────────────────────────────────────── */

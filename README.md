@@ -189,7 +189,8 @@ One GTM tag. Five minutes.
    address unless it has first name, last name, postcode **and** country together — and almost no
    lead form asks for country. Set it to `true` and country is filled from `DEFAULT_COUNTRY`;
    leave it `false` and most forms will send no address at all. Set it only where enquiries
-   genuinely come from one country.
+   genuinely come from one country — it is an inferred value, not one the visitor gave, and a
+   visitor who *does* answer keeps their answer even if we cannot read it.
 4. **Triggering → All Pages.**
 5. Name it something like `Form tracking` and **Save**.
 
