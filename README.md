@@ -52,8 +52,8 @@ the form itself — Contact Form 7, Gravity Forms, HTML Forms, most WordPress fo
 `defaultPrevented` and threw the event away. Those are now reported. See `REPORT_AJAX_SUBMISSIONS`
 in the config block for the one trade-off that carries.
 
-**Install is one GTM Custom HTML tag.** Paste the file in, set two constants — a country code and
-`CONSENT_MODE` — and trigger on All Pages. Read "If you are on 1.3, upgrade" above as well: it
+**Install is one GTM Custom HTML tag.** Paste the file in, set three constants — a country code,
+`CONSENT_MODE`, and whether to assume that country on addresses — and trigger on All Pages. Read "If you are on 1.3, upgrade" above as well: it
 covers `CONSENT_MODE`, which did not exist when 1.2 shipped and which decides whether this collects
 anything at all.
 
@@ -109,6 +109,32 @@ Google needs at least an email, a phone number, or a complete address (first nam
 postal code and country). If none of those are present the `user_data` object is dropped and
 you get a bare `html_form_submit`.
 
+### The address block is all four or none
+
+`address` is sent only when first name, last name, postal code **and** country are all present. Miss
+any one and the entire block is withheld — including street, city and region.
+
+That is Google's rule, not a choice made here. Send three of the four and it discards the lot and
+reports *"your enhanced conversions addresses are missing required fields"* in the diagnostics
+panel. So a partial address is not partial credit, it is zero credit and a warning. Up to 1.4 this
+sent whatever it had, which is how that warning turned up on a live account.
+
+Email and phone are unaffected — they are separate identifiers and go regardless. A form with an
+email and half an address still sends the email.
+
+**Country is the one that will bite you.** Almost no lead form asks for it, so a form collecting
+name, phone and postcode — the standard UK enquiry shape — has three of the four and sends no
+address at all. If the site's enquiries genuinely come from one country, set:
+
+```js
+var ASSUME_DEFAULT_COUNTRY = true;
+```
+
+and country is filled from `DEFAULT_COUNTRY` when it is missing. It is an assumption, so it is off
+by default, but the downside is small: a wrong country means the address fails to match, which is
+exactly where it was already. Leave it off if the site takes enquiries from anywhere and you would
+rather send nothing than guess.
+
 Field names are matched exactly against the allowlist, retried at each level as common prefixes
 are stripped. So `your-email`, `billing_email` and `email` all resolve to email, Elementor's
 `form_fields[email]` and Shopify's `address[zip]` resolve too, and `address_1` still resolves to
@@ -144,11 +170,12 @@ One GTM tag. Five minutes.
 1. **Tags → New → Tag Configuration → Custom HTML.**
 2. Open the `html-forms` file in this repo, select **all of it**, and paste it into the HTML box.
    Include the `<script>` and `</script>` lines at the top and bottom.
-3. Near the top you will see a short config block. Change two values:
+3. Near the top you will see a short config block. Change three values:
 
    ```js
-   var DEFAULT_COUNTRY = 'GB';
-   var CONSENT_MODE    = 'cmp';
+   var DEFAULT_COUNTRY        = 'GB';    // where are most of this site's visitors?
+   var CONSENT_MODE           = 'cmp';   // does this site have a cookie banner?
+   var ASSUME_DEFAULT_COUNTRY = false;   // do enquiries come from one country?
    ```
 
    `DEFAULT_COUNTRY` is the country most of this site's visitors are in. It is the one that
@@ -157,6 +184,13 @@ One GTM tag. Five minutes.
    `CONSENT_MODE` is `'cmp'` if this site has a consent banner and `'none'` if it does not. Read
    the Consent section before setting `'none'`; it is a statement about the deployment and the
    script trusts you.
+
+   `ASSUME_DEFAULT_COUNTRY` is the one most sites need and nobody expects. Google discards an
+   address unless it has first name, last name, postcode **and** country together — and almost no
+   lead form asks for country. Set it to `true` and country is filled from `DEFAULT_COUNTRY`;
+   leave it `false` and most forms will send no address at all. Set it only where enquiries
+   genuinely come from one country — it is an inferred value, not one the visitor gave, and a
+   visitor who *does* answer keeps their answer even if we cannot read it.
 4. **Triggering → All Pages.**
 5. Name it something like `Form tracking` and **Save**.
 
@@ -219,11 +253,54 @@ and name only. Someone who withdraws consent halfway through a session stops bei
 immediately, rather than at their next page load.
 
 **An unreadable signal is a denial.** A grant has to be positive and unambiguous. An unreadable
-shape, a dataLayer that has been reset, a `default` arriving after an `update`, a region-scoped
-entry for somewhere else: all of those resolve to denied, not granted. An earlier draft defaulted
-to granted on anything it could not read, which meant a CMP whose updates never reached the
-dataLayer in the expected shape looked exactly like consent. A control that fails open while its
-documentation says it fails closed is worse than no control at all.
+shape, a dataLayer that has been reset, a `default` arriving after an `update`: all of those
+resolve to denied, not granted. An earlier draft defaulted to granted on anything it could not
+read, which meant a CMP whose updates never reached the dataLayer in the expected shape looked
+exactly like consent. A control that fails open while its documentation says it fails closed is
+worse than no control at all.
+
+### Regional defaults cannot be resolved here
+
+The standard Consent Mode v2 setup is a restrictive default for a list of regions plus a permissive
+global fallback for everyone else:
+
+```js
+gtag('consent', 'default', { ad_user_data: 'denied',  region: ['GB','ES', /* … */] });
+gtag('consent', 'default', { ad_user_data: 'granted' });
+```
+
+Which of those applies depends on where the visitor is, and **this code runs in a browser that is
+not told**. Up to 1.4 it skipped region-scoped entries as "probably somewhere else" and read the
+fallback — so a visitor inside a denied region who never touched the banner had their hashed email
+pushed to the dataLayer and reported as a clean success.
+
+Guessing has no safe direction: read the fallback and you over-collect, ignore it and you
+under-collect. So it now reports neither, as `region_unresolved`, and `CONSENT_MODE` decides what
+that silence means exactly as it does elsewhere.
+
+**Anyone who answers the banner is unaffected.** Accept or reject, their CMP pushes a global
+`update`, and that resolves the question whatever the regional defaults said. The cost falls only
+on people who never engage with the banner at all, and only on sites using regional defaults.
+
+**Know the size of that before you accept it.** Didomi's January 2026 benchmark, drawn from
+hundreds of millions of European consent interactions during 2025, puts the no-choice rate — people
+who neither accept nor reject — at
+[21.7% to 27.4%](https://www.didomi.io/blog/benchmark-average-consent-rate-europe) depending on
+region, and higher in some industries. So on a site with regional defaults, expect roughly a fifth
+to a quarter of visitors to produce no enhanced-conversions match until they answer.
+
+That is the price of not guessing. The thing it buys is that the other direction — reading the
+global fallback and hoping — pushed hashed emails into a page-global array for people whose own
+regional default said no.
+
+If the cost is too high for a given site, `window.formTrackingConsentFn` is the way out — your CMP
+knows the visitor's region and this script does not, so let it answer:
+
+```js
+window.formTrackingConsentFn = function () {
+  return myCmp.getConsent('advertising') === true;   // whatever your CMP exposes
+};
+```
 
 ### The one case you have to decide: no signal at all
 
@@ -291,6 +368,7 @@ about ninety days late.
 | `collected_undeclared` | `user_data` attached because `CONSENT_MODE = 'none'` |
 | `consent_denied` | A signal said no |
 | `no_consent_signal` | `CONSENT_MODE = 'cmp'`, and nothing emitted a signal |
+| `region_unresolved` | Consent is configured per region, which a browser cannot resolve |
 | `no_fields` | Consent fine, nothing on the form to match on |
 | `no_crypto` | No SubtleCrypto, so not a secure context |
 | `error` | Hashing or assembly threw |
