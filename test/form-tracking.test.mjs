@@ -735,6 +735,45 @@ console.log('\nregion-scoped consent cannot be resolved in a browser');
     submissions[0]?.user_data_status);
 }
 {
+  // Region scopes a `default`, never an `update` — Google documents it on
+  // the default command only. A CMP that builds one settings object and
+  // reuses it across both had the visitor's actual answer discarded.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','update',
+      { ad_user_data: 'granted', region: ['GB'] }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a region key on an update does not make it unresolvable',
+    submissions[0]?.user_data_status === 'collected' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
+  // Worse shape of the same bug: the later, real answer was dropped and a
+  // stale earlier denial stood.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','update',{ ad_user_data: 'denied' }]);
+      window.dataLayer.push(['consent','update',{ ad_user_data: 'granted', region: ['US'] }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a later region-tagged update overrides an earlier global one',
+    submissions[0]?.user_data_status === 'collected' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
+  // And in the denying direction, or the fix would be a one-way ratchet.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','update',{ ad_user_data: 'granted' }]);
+      window.dataLayer.push(['consent','update',{ ad_user_data: 'denied', region: ['US'] }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('and a later region-tagged update can also withdraw',
+    submissions[0]?.user_data_status === 'consent_denied' && !submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
   // The documented way out for a site that genuinely uses regional defaults.
   const { submissions } = await run('/consent', 1, async (p) => {
     await p.evaluate(`window.formTrackingConsentFn = function () { return true; };

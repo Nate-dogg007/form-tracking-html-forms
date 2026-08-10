@@ -445,9 +445,38 @@
         // Checked before the region test, so a region-scoped entry about
         // some other consent type does not make this one unresolvable.
         if (typeof settings.ad_user_data !== 'string') continue;
-        // Noted, not read: see below for why it cannot be resolved here.
-        if (settings.region) { sawRegionScoped = true; continue; }
-        // Consent Mode semantics: a default never overrides an update.
+        /*
+          Region scoping is a feature of the `default` command only —
+          Google documents it as "specify a region (according to ISO
+          3166-2) in your gtag consent default command", and the gtag
+          reference does not list region among the consent parameters at
+          all. So a region key on an `update` is not a scoping
+          instruction, and treating it as one threw away the visitor's
+          own answer: a CMP that builds one settings object and reuses it
+          across both commands had its update ignored, and a stale
+          earlier denial stood instead.
+
+          Region-scoped defaults are noted, not read — see below.
+        */
+        if (command === 'default' && settings.region) {
+          sawRegionScoped = true;
+          continue;
+        }
+        /*
+          Once the visitor has answered, a later `default` is ignored.
+
+          This is our choice, not a documented Consent Mode guarantee —
+          Google's docs are silent on the interaction, and a stray
+          `default` re-firing after a CMP's `update` is a known way to
+          reset consent state in a real container. We privilege the
+          answer because the alternative lets a leftover hardcoded
+          default overrule what the visitor actually clicked.
+
+          The residual risk runs one way: update-granted followed by
+          default-denied keeps us collecting while Google's own state may
+          have reverted. A stray default is a container bug either way,
+          and this is the direction that respects the click.
+        */
         if (command === 'default' && sawUpdate) continue;
         state = settings.ad_user_data === 'granted';
         if (command === 'update') sawUpdate = true;

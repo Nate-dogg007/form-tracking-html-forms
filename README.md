@@ -244,12 +244,23 @@ Guessing has no safe direction: read the fallback and you over-collect, ignore i
 under-collect. So it now reports neither, as `region_unresolved`, and `CONSENT_MODE` decides what
 that silence means exactly as it does elsewhere.
 
-**Most visitors are unaffected.** Anyone who answers the banner gets a global `update` pushed, and
-that resolves the question whatever the regional defaults said. The cost falls only on people who
-never engaged with it, and only on sites using regional defaults.
+**Anyone who answers the banner is unaffected.** Accept or reject, their CMP pushes a global
+`update`, and that resolves the question whatever the regional defaults said. The cost falls only
+on people who never engage with the banner at all, and only on sites using regional defaults.
 
-If that cost matters to you, `window.formTrackingConsentFn` is the way out — your CMP knows the
-visitor's region and this script does not, so let it answer:
+**Know the size of that before you accept it.** Didomi's January 2026 benchmark, drawn from
+hundreds of millions of European consent interactions during 2025, puts the no-choice rate — people
+who neither accept nor reject — at
+[21.7% to 27.4%](https://www.didomi.io/blog/benchmark-average-consent-rate-europe) depending on
+region, and higher in some industries. So on a site with regional defaults, expect roughly a fifth
+to a quarter of visitors to produce no enhanced-conversions match until they answer.
+
+That is the price of not guessing. The thing it buys is that the other direction — reading the
+global fallback and hoping — pushed hashed emails into a page-global array for people whose own
+regional default said no.
+
+If the cost is too high for a given site, `window.formTrackingConsentFn` is the way out — your CMP
+knows the visitor's region and this script does not, so let it answer:
 
 ```js
 window.formTrackingConsentFn = function () {
