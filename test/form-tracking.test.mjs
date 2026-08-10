@@ -774,6 +774,44 @@ console.log('\nregion-scoped consent cannot be resolved in a browser');
     submissions[0]?.user_data_status);
 }
 {
+  /*
+    The warning is the whole remedy here — the status says collection did
+    not happen, the warning is the only thing that says what to do about
+    it. An unasserted string is one typo from shipping silent.
+  */
+  const warnings = [];
+  await run('/consent', 1, async (p) => {
+    p.on('console', (m) => { if (m.type() === 'warning') warnings.push(m.text()); });
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_user_data: 'denied', region: ['GB'] }]);
+      window.dataLayer.push(['consent','default',{ ad_user_data: 'granted' }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  const w = warnings.join(' | ');
+  check('the region warning explains the cause, not just the symptom',
+    /per region/.test(w) && /which region the visitor is in/.test(w), w);
+  check('and names the way out', /formTrackingConsentFn/.test(w), w);
+  check('and says who is unaffected', /answer the banner/.test(w), w);
+}
+{
+  // Region-scoped entries are themselves proof something manages consent,
+  // so declaring 'none' on such a site has to be contradicted even when no
+  // CMP left a fingerprint we recognise.
+  const warnings = [];
+  await run('/consent', 1, async (p) => {
+    p.on('console', (m) => { if (m.type() === 'warning') warnings.push(m.text()); });
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_user_data: 'denied', region: ['GB'] }]);
+      window.dataLayer.push(['consent','default',{ ad_user_data: 'granted' }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none', consentMode: 'none' });
+  const w = warnings.join(' | ');
+  check("declaring 'none' against region-scoped entries is contradicted",
+    /CONSENT_MODE is "none"/.test(w) && /region-scoped Consent Mode entries are/.test(w), w);
+}
+{
   // The documented way out for a site that genuinely uses regional defaults.
   const { submissions } = await run('/consent', 1, async (p) => {
     await p.evaluate(`window.formTrackingConsentFn = function () { return true; };
