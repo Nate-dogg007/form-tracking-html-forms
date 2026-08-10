@@ -1,5 +1,5 @@
 /*
-  End-to-end tests for html-forms v1.3.
+  End-to-end tests for html-forms v1.4.
   Runs the real script in real Chromium against real forms.
 
     npm install playwright   (or use a global install via NODE_PATH)
@@ -24,12 +24,17 @@ const SOURCE = readFileSync(join(HERE, '..', 'html-forms'), 'utf8')
 const EVENT_NAME = 'html_form_submit';
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
-const script = (country) => {
+const script = (country, consentMode) => {
   let out = SOURCE;
   if (country) {
     const cflag = `var DEFAULT_COUNTRY = '${country}';`;
     out = out.replace(/var DEFAULT_COUNTRY = '[A-Za-z]{2}';/, cflag);
     if (!out.includes(cflag)) throw new Error('could not set DEFAULT_COUNTRY');
+  }
+  if (consentMode) {
+    const mflag = `var CONSENT_MODE = '${consentMode}';`;
+    out = out.replace(/var CONSENT_MODE = '[a-z]+';/, mflag);
+    if (!out.includes(mflag)) throw new Error('could not set CONSENT_MODE');
   }
   return out;
 };
@@ -309,6 +314,16 @@ const PAGES = {
       <button type="submit">Send</button>
     </form>`),
 
+  // A field that matches, but not enough of them for Google to match on:
+  // exercises buildUserData() returning null, which is a different route to
+  // no_fields than a form with nothing recognisable on it at all.
+  '/partial-identifier': page(`
+    <iframe name="sink" style="display:none"></iframe>
+    <form id="partial" action="/thanks" method="get" target="sink">
+      <input name="first_name" value="Jane">
+      <button type="submit">Send</button>
+    </form>`),
+
   '/thanks': page('<h1>thanks</h1>')
 };
 
@@ -385,14 +400,19 @@ async function run(path, installs = 1, act, opts = {}) {
     await pg.addInitScript(`window.dataLayer.push(['consent','default',
       { ad_user_data: 'granted', ad_storage: 'granted' }]);`);
   }
+  // Runs before the tag installs — the only way to reach anything the script
+  // decides once, at install, such as whether SubtleCrypto exists.
+  if (opts.preScript) await pg.addInitScript(opts.preScript);
   // injectAfterLoad models GTM running the tag on a consent update, after
   // the DOM already exists, rather than at document-start.
   if (!opts.injectAfterLoad) {
-      for (let i = 0; i < installs; i++) await pg.addInitScript(script(opts.country));
+      for (let i = 0; i < installs; i++) await pg.addInitScript(script(opts.country, opts.consentMode));
   }
   await pg.goto(`${BASE}${path}`);
   if (opts.injectAfterLoad) {
-    for (let i = 0; i < installs; i++) await pg.addScriptTag({ content: script(opts.country) });
+    for (let i = 0; i < installs; i++) {
+      await pg.addScriptTag({ content: script(opts.country, opts.consentMode) });
+    }
   }
   await (act || (async (p) => { await p.click('button[type=submit]'); }))(pg);
   await pg.waitForTimeout(opts.silentGtm ? 1800 : 400);
@@ -926,6 +946,217 @@ console.log('\nprogrammatic form.submit()');
     submissions[0]?.user_data?.sha256_email_address === sha256('prog@example.com'),
     JSON.stringify(submissions));
   check('programmatic submit still navigates', url.includes('/thanks'), url);
+}
+
+/*
+  Expected statuses are written out as literals on purpose. Deriving them
+  from the script's own constants would make these assertions agree with
+  whatever the code happens to say, including a typo, which is how a suite
+  ends up green while the field is broken.
+*/
+console.log('\nuser_data_status says why');
+{
+  const { submissions } = await run('/consent', 1);
+  check("a grant reports 'collected'",
+    submissions[0]?.user_data_status === 'collected', submissions[0]?.user_data_status);
+  check('and carries user_data', !!submissions[0]?.user_data);
+  check('and adds no cmp_detected', !('cmp_detected' in (submissions[0] || {})),
+    submissions[0]?.cmp_detected);
+}
+{
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(() => window.dataLayer.push(
+      ['consent', 'update', { ad_user_data: 'denied' }]));
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check("a denial reports 'consent_denied'",
+    submissions[0]?.user_data_status === 'consent_denied', submissions[0]?.user_data_status);
+  check('and carries no user_data', !submissions[0]?.user_data);
+}
+{
+  const { submissions } = await run('/consent', 1, null, { consent: 'none' });
+  check("silence under CONSENT_MODE 'cmp' reports 'no_consent_signal'",
+    submissions[0]?.user_data_status === 'no_consent_signal', submissions[0]?.user_data_status);
+  check('and carries no user_data', !submissions[0]?.user_data);
+}
+{
+  const { submissions } = await run('/consent', 1, null,
+    { consent: 'none', consentMode: 'none' });
+  check("silence under CONSENT_MODE 'none' reports 'collected_undeclared'",
+    submissions[0]?.user_data_status === 'collected_undeclared',
+    submissions[0]?.user_data_status);
+  check('and DOES carry user_data — this is the no-CMP case working',
+    !!submissions[0]?.user_data, JSON.stringify(submissions[0]));
+}
+{
+  // The declaration governs the silence only. A CMP that speaks still wins.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(() => window.dataLayer.push(
+      ['consent', 'update', { ad_user_data: 'denied' }]));
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none', consentMode: 'none' });
+  check("a denial still wins under CONSENT_MODE 'none'",
+    submissions[0]?.user_data_status === 'consent_denied', submissions[0]?.user_data_status);
+  check('and no user_data is collected', !submissions[0]?.user_data,
+    JSON.stringify(submissions[0]?.user_data));
+}
+{
+  const { submissions } = await run('/no-fields', 1);
+  check("a form with nothing matchable reports 'no_fields'",
+    submissions[0]?.user_data_status === 'no_fields', submissions[0]?.user_data_status);
+}
+{
+  // The invariant the whole design rests on: the conversion is never what
+  // gets gated. Anything that suppresses the event is a bug, not a stricter
+  // reading of consent.
+  const deny = async (p) => {
+    await p.evaluate(() => window.dataLayer.push(
+      ['consent', 'update', { ad_user_data: 'denied' }]));
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  };
+  const cases = [
+    ['granted',         null,  { }],
+    ['denied',          deny,  { consent: 'none' }],
+    ['denied, mode none', deny, { consent: 'none', consentMode: 'none' }],
+    ['no signal, cmp',  null,  { consent: 'none' }],
+    ['no signal, none', null,  { consent: 'none', consentMode: 'none' }]
+  ];
+  for (const [label, act, opts] of cases) {
+    const { submissions } = await run('/consent', 1, act, opts);
+    check(`event still fires: ${label}`, submissions.length === 1,
+      `got ${submissions.length}`);
+  }
+}
+
+/*
+  A status nobody asserts is a status nobody can trust. Typo either of these
+  literals in the source and the rest of the suite still reports green, which
+  is the same blind spot the status field exists to close.
+*/
+console.log('\nthe hashing failure paths report, rather than disappearing');
+{
+  const { submissions } = await run('/consent', 1, null, {
+    preScript: `Object.defineProperty(window, 'crypto', { value: {}, configurable: true });`
+  });
+  check("no SubtleCrypto reports 'no_crypto'",
+    submissions[0]?.user_data_status === 'no_crypto', submissions[0]?.user_data_status);
+  check('and the event still fires', submissions.length === 1, `got ${submissions.length}`);
+  check('and nothing personal rides along', !submissions[0]?.user_data);
+}
+{
+  // An async crypto failure is already swallowed by sha256Hex, so the hashes
+  // come back empty and there is nothing left to match on.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.crypto.subtle.digest = function () {
+      return Promise.reject(new Error('crypto disabled')); }`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(400);
+  });
+  check("a rejecting digest() reports 'no_fields'",
+    submissions[0]?.user_data_status === 'no_fields', submissions[0]?.user_data_status);
+  check('and the event still fires', submissions.length === 1, `got ${submissions.length}`);
+}
+{
+  // Regression. A synchronous throw goes past .catch, out of the handler and
+  // into the DOM hook's try/catch, which pushed NOTHING — the submission
+  // disappeared entirely. Some privacy extensions replace crypto.subtle with
+  // exactly this shape.
+  for (const [label, patch] of [
+    ['digest() throws synchronously',
+      `window.crypto.subtle.digest = function () { throw new Error('blocked'); }`],
+    ['digest() returns a non-promise',
+      `window.crypto.subtle.digest = function () { return undefined; }`]
+  ]) {
+    const { submissions } = await run('/consent', 1, async (p) => {
+      await p.evaluate(patch);
+      await p.click('button[type=submit]');
+      await p.waitForTimeout(400);
+    });
+    check(`${label} still fires the conversion`, submissions.length === 1,
+      `got ${submissions.length}`);
+    check(`${label} reports 'error'`,
+      submissions[0]?.user_data_status === 'error', submissions[0]?.user_data_status);
+    check(`${label} carries no user_data`, !submissions[0]?.user_data);
+  }
+}
+{
+  // The other route to no_fields: fields matched, but not enough of them.
+  const { submissions } = await run('/partial-identifier', 1);
+  check("a lone first_name reports 'no_fields', not a partial user_data",
+    submissions[0]?.user_data_status === 'no_fields' && !submissions[0]?.user_data,
+    JSON.stringify(submissions[0]));
+}
+
+console.log('\nCMP detection contradicts the declaration, never decides it');
+{
+  // The live failure this was built for: a CMP present, asking visitors,
+  // emitting no Consent Mode signal at all. Naming it is the difference
+  // between "something is wrong" and "go and wire this up".
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(() => {
+      const s = document.createElement('script');
+      s.id = 'cookieBanner-143376892';
+      document.head.appendChild(s);
+    });
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a silent CMP is still no_consent_signal',
+    submissions[0]?.user_data_status === 'no_consent_signal', submissions[0]?.user_data_status);
+  check('and cmp_detected names it', submissions[0]?.cmp_detected === 'HubSpot',
+    submissions[0]?.cmp_detected);
+  check('and the conversion event still fires', submissions.length === 1);
+}
+{
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(() => { window.OneTrust = {}; });
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none', consentMode: 'none' });
+  check("declaring 'none' with a CMP present is flagged",
+    submissions[0]?.cmp_detected === 'OneTrust', submissions[0]?.cmp_detected);
+  check('but the declaration still governs — it collects',
+    !!submissions[0]?.user_data, JSON.stringify(submissions[0]));
+}
+{
+  const { submissions } = await run('/consent', 1, null, { consent: 'none' });
+  check('no CMP on the page adds no cmp_detected key',
+    !('cmp_detected' in (submissions[0] || {})), submissions[0]?.cmp_detected);
+}
+{
+  // A typo falls through to fail-closed, which is the safe direction but a
+  // baffling one: the warning used to tell you to set CONSENT_MODE = "none",
+  // which is exactly what you believe you did.
+  const warnings = [];
+  const { submissions } = await run('/consent', 1, async (p) => {
+    p.on('console', (m) => { if (m.type() === 'warning') warnings.push(m.text()); });
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none', consentMode: 'None' });
+  check('a mis-cased CONSENT_MODE fails closed, not open',
+    submissions[0]?.user_data_status === 'no_consent_signal' && !submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+  check('and says the value is the problem, rather than repeating the advice',
+    warnings.some((w) => w.includes('"None"') && w.includes('neither')),
+    warnings.join(' | '));
+}
+{
+  // A CMP that throws when probed must not take the submission down with it.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(() => {
+      Object.defineProperty(window, 'Osano', {
+        get() { throw new Error('probe exploded'); }
+      });
+    });
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a CMP that throws when probed does not break the event',
+    submissions.length === 1 && submissions[0]?.user_data_status === 'no_consent_signal',
+    JSON.stringify(submissions[0]));
 }
 
 /* ── Result ──────────────────────────────────────────────────────────── */

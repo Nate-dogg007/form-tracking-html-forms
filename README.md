@@ -1,11 +1,34 @@
 # HTML form tracking for Google Ads enhanced conversions
 
 Author: Nathan O'Connor
-Version: 1.3
+Version: 1.4
 
 Captures form submissions a visitor made, normalises and SHA-256 hashes the user-provided data
 fields Google Ads wants, and pushes one `html_form_submit` event to the dataLayer. Personal data is
 only ever read once your CMP has granted `ad_user_data`, re-checked on every submission.
+
+## If you are on 1.3, upgrade
+
+1.3 collected nothing on any site that was not running Consent Mode v2, warned about it once in a
+console nobody had open, and was otherwise indistinguishable from working. That is fine behaviour
+for a UK site with a banner and wrong for a US site with none — and there was no way to tell the
+two apart, because both look like the same silence.
+
+**`REQUIRE_EXPLICIT_CONSENT` is now `CONSENT_MODE`.** Set it to `'cmp'` if the site has a consent
+banner, `'none'` if it does not. `'cmp'` is the default and leaves the collection decision exactly
+as 1.3 made it, so a straight paste-over collects the same things — the events now carry
+`user_data_status`, which 1.3 never emitted, but nothing about what is collected changes. If you
+had set `REQUIRE_EXPLICIT_CONSENT = false`, you now
+want `CONSENT_MODE = 'none'` — paste 1.4 over the tag without setting it and that site quietly
+stops collecting.
+
+**Every event now carries `user_data_status`.** Four failure modes used to push identical events;
+they are now told apart, and the reason travels with the event. See below — this is the part worth
+wiring into a dashboard.
+
+**And it names the CMP it found.** When there is no consent signal but a known CMP is on the page,
+`cmp_detected` says which one. That is the difference between "enhanced conversions is not working"
+and "HubSpot's banner is not wired to Consent Mode".
 
 ## If you are on 1.2, upgrade
 
@@ -29,8 +52,10 @@ the form itself — Contact Form 7, Gravity Forms, HTML Forms, most WordPress fo
 `defaultPrevented` and threw the event away. Those are now reported. See `REPORT_AJAX_SUBMISSIONS`
 in the config block for the one trade-off that carries.
 
-**Install is one GTM Custom HTML tag.** Paste the file in, set one country code, trigger on All
-Pages. Nothing to toggle.
+**Install is one GTM Custom HTML tag.** Paste the file in, set two constants — a country code and
+`CONSENT_MODE` — and trigger on All Pages. Read "If you are on 1.3, upgrade" above as well: it
+covers `CONSENT_MODE`, which did not exist when 1.2 shipped and which decides whether this collects
+anything at all.
 
 This feeds **Google Ads enhanced conversions only**. Do not put the hashed fields into GA4 event
 parameters or custom dimensions: that is what
@@ -119,19 +144,24 @@ One GTM tag. Five minutes.
 1. **Tags → New → Tag Configuration → Custom HTML.**
 2. Open the `html-forms` file in this repo, select **all of it**, and paste it into the HTML box.
    Include the `<script>` and `</script>` lines at the top and bottom.
-3. Near the top you will see a short config block. Change one value:
+3. Near the top you will see a short config block. Change two values:
 
    ```js
    var DEFAULT_COUNTRY = 'GB';
+   var CONSENT_MODE    = 'cmp';
    ```
 
-   Set it to the country most of this site's visitors are in. This is the only value you normally
-   need to touch, and it is the one that quietly ruins everything if it is wrong — see below.
+   `DEFAULT_COUNTRY` is the country most of this site's visitors are in. It is the one that
+   quietly ruins everything if it is wrong — see below.
+
+   `CONSENT_MODE` is `'cmp'` if this site has a consent banner and `'none'` if it does not. Read
+   the Consent section before setting `'none'`; it is a statement about the deployment and the
+   script trusts you.
 4. **Triggering → All Pages.**
 5. Name it something like `Form tracking` and **Save**.
 
-That is the whole install. There is nothing to toggle, no second tag, and no consent setting to
-configure on this tag: the script checks consent itself, on every submission.
+That is the whole install. There is no second tag and no consent setting to configure on this tag:
+the script checks consent itself, on every submission.
 
 ### Why DEFAULT_COUNTRY matters
 
@@ -188,16 +218,44 @@ Granted, and `html_form_submit` carries `user_data`. Denied, and `html_form_subm
 and name only. Someone who withdraws consent halfway through a session stops being read from
 immediately, rather than at their next page load.
 
-**It fails closed.** A grant has to be positive and unambiguous. No consent signal, an
-unreadable shape, a dataLayer that has been reset, a `default` arriving after an `update`, a
-region-scoped entry for somewhere else: all of those resolve to denied, not granted. An earlier
-draft defaulted to granted on anything it could not read, which meant a CMP whose updates never
-reached the dataLayer in the expected shape looked exactly like consent. A control that fails
-open while its documentation says it fails closed is worse than no control at all.
+**An unreadable signal is a denial.** A grant has to be positive and unambiguous. An unreadable
+shape, a dataLayer that has been reset, a `default` arriving after an `update`, a region-scoped
+entry for somewhere else: all of those resolve to denied, not granted. An earlier draft defaulted
+to granted on anything it could not read, which meant a CMP whose updates never reached the
+dataLayer in the expected shape looked exactly like consent. A control that fails open while its
+documentation says it fails closed is worse than no control at all.
 
-The practical consequence: **if you are not running Consent Mode v2, no user data is collected.**
-It logs one console warning saying so, because silence here is indistinguishable from working.
-Set `REQUIRE_EXPLICIT_CONSENT = false` only if you have another lawful basis and know what it is.
+### The one case you have to decide: no signal at all
+
+Absence is not the same as an unreadable signal, and it is the one thing the script cannot work
+out for itself. **"This site has no CMP" and "this site has a CMP that never emits Consent Mode"
+are the same silence.** Nothing available to JavaScript separates them.
+
+So you declare which one it is, with `CONSENT_MODE` in the config block:
+
+| `CONSENT_MODE` | Means | What silence does |
+|---|---|---|
+| `'cmp'` *(default)* | This site has a CMP | Collect nothing — the CMP is misconfigured |
+| `'none'` | No CMP here, and you have a lawful basis | Collect |
+
+**A signal always wins where there is one.** `'none'` still honours a denial if a CMP turns up and
+says no; the declaration only ever governs the silence. That is what makes `'none'` safe to leave
+set on a site that later acquires a banner.
+
+Anything that is not exactly `'none'` — `'None'`, `'none '`, a stray typo — falls through to the
+fail-closed branch and says so by name in the console, rather than telling you to set the value you
+think you already set.
+
+Getting this wrong in the `'none'` direction, on a site that does have a banner, means collecting
+from people who declined. So the script also fingerprints the common CMPs — CookieYes, OneTrust,
+Cookiebot, HubSpot, Complianz, Termly, Iubenda, Usercentrics, Osano, IAB TCF — and reports what it
+finds as `cmp_detected` whenever there was no signal to read.
+
+It never uses that to decide anything. A fingerprint list is always incomplete, which makes it
+unfit to grant or deny and perfectly fit to catch a contradiction: a hit is conclusive, a miss
+proves nothing. Under `'cmp'` it names the thing to go and wire up. Under `'none'` it means the
+declaration was wrong. Both warn in the console, and both put it on the dataLayer where you can
+build an alert on it.
 
 If your CMP does something the dataLayer does not reflect, set `window.formTrackingConsentFn` to
 a function returning `true` when user data may be collected. Anything else, including `undefined`,
@@ -208,7 +266,54 @@ function that throws is denied too.
 there. Anything pushed before withdrawal stays readable to other tags for the life of that page
 view, and only a page load clears it.
 
+**The conversion is never what gets gated.** `html_form_submit` fires on every visitor submission
+in every case above. Only the `user_data` payload is withheld. If you find yourself suppressing
+the event to be safe, that is a bug, not a stricter reading of consent — you have thrown away a
+conversion to protect data you were not going to send anyway.
+
 Consent for the Google Ads conversion tag itself is a separate matter, covered below.
+
+## Knowing whether it worked: `user_data_status`
+
+Every `html_form_submit` carries a `user_data_status`. It exists because without it the failures
+are invisible.
+
+Before 1.4, four different outcomes pushed a byte-identical event: consent denied, no CMP signal
+at all, no matchable field on the form, and no SubtleCrypto. A broken install and a working one
+looked the same from the dataLayer, from GA4, and from anywhere else you might look. A live site
+ran that way for months — 342 of 365 conversions arrived with no user data, and the only trace was
+a console warning nobody had a reason to be looking at. Google's diagnostics eventually said so,
+about ninety days late.
+
+| Value | Meaning |
+|---|---|
+| `collected` | `user_data` attached, after a positive signal |
+| `collected_undeclared` | `user_data` attached because `CONSENT_MODE = 'none'` |
+| `consent_denied` | A signal said no |
+| `no_consent_signal` | `CONSENT_MODE = 'cmp'`, and nothing emitted a signal |
+| `no_fields` | Consent fine, nothing on the form to match on |
+| `no_crypto` | No SubtleCrypto, so not a secure context |
+| `error` | Hashing or assembly threw |
+
+`cmp_detected` appears whenever no consent signal could be read and a known CMP was found on the
+page anyway, naming it. It follows the *state*, not the status, so it can ride along with any
+status reachable from there — a form with no matchable fields still reports `no_fields`, and still
+tells you which CMP was sitting there silent.
+
+Worth watching, in rough order of how much they should bother you:
+
+- **`no_consent_signal` with a `cmp_detected`** — a CMP is on the page and is not emitting Consent
+  Mode. Someone changed CMP and nobody re-wired it. This is the one that runs for months.
+- **`collected_undeclared` with a `cmp_detected`** — the site declared `'none'` and has a banner.
+  Collecting from people who may have declined. Fix today.
+- **`no_crypto`** — the page is not a secure context. Almost always a staging URL or mixed content.
+- **`no_fields` on a form that clearly has an email box** — the field names are not being matched.
+  See *Fields the script cannot guess*.
+
+To see any of this in GTM, add a **Data Layer Variable** named `user_data_status` with the same
+Data Layer Variable Name, and send it as a parameter on whatever you already fire — a GA4 event
+works fine. Do not put it on the Google Ads conversion tag; it is a diagnostic, not a conversion
+property.
 
 ## GTM setup
 
@@ -338,9 +443,11 @@ In the Tag Assistant window:
    `sha256_email_address` and an `address` block.
 3. Check the **Tags** tab shows `Google Ads - Lead conversion` fired.
 
-**If the event fires but `user_data` is empty**, consent is being read as denied. Open the browser
-console — the script logs one warning explaining exactly that. It fails closed, so no readable
-`ad_user_data` signal means no user data, deliberately.
+**If the event fires but `user_data` is empty**, do not guess — the event says why. Look at
+`user_data_status` in the same Variables tab. Consent is only one of the reasons it can be empty;
+the form's field names not matching is just as common, and looks identical from here. See
+[Knowing whether it worked](#knowing-whether-it-worked-user_data_status) for what each value means
+and what to do about it. The script also logs one console warning for the consent cases.
 
 ---
 
