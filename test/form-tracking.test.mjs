@@ -758,6 +758,20 @@ console.log('\nregion-scoped consent cannot be resolved in a browser');
     submissions[0]?.user_data_status);
 }
 {
+  // region: [] is truthy in JavaScript. Some CMPs emit it instead of
+  // omitting the key, and it was collapsing a readable global default into
+  // region_unresolved.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+      { ad_user_data: 'granted', region: [] }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('an empty region array is not region-scoped',
+    submissions[0]?.user_data_status === 'collected' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
   // A region-scoped entry about a DIFFERENT consent type must not poison
   // the read — otherwise almost every EEA site fails closed for no reason.
   const { submissions } = await run('/consent', 1, async (p) => {
