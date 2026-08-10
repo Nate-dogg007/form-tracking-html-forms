@@ -2,7 +2,7 @@
 /*
   ░▒▓█ HTML Form Tracking → Google Ads Enhanced Conversions █▓▒░
   Author:  Nathan O'Connor
-  Version: 1.3
+  Version: 1.4
 
   ─────────────────────────────────────────────────────────────
   WHAT THIS DOES
@@ -14,7 +14,9 @@
     • Normalises to Google's spec, SHA-256 hashes the fields Google wants
       hashed, and leaves city/region/postal_code/country in the clear.
     • Pushes ONE `html_form_submit` event to the dataLayer, and holds the
-      submission until the tag has fired.
+      submission until the tag has fired. Every event carries
+      `user_data_status` saying whether user data went with it and, if not,
+      which of the reasons it was.
 
   WHERE IT SENDS
     Google Ads enhanced conversions (User-Provided Data) only.
@@ -25,15 +27,19 @@
   HOW TO INSTALL
 
     ONE GTM Custom HTML tag. Paste this whole file in, set
-    DEFAULT_COUNTRY below, trigger it on All Pages, save. That is it.
-    There is nothing to toggle and no second tag.
+    DEFAULT_COUNTRY and CONSENT_MODE below, trigger it on All Pages, save.
+    That is it. There is no second tag.
 
   CONSENT
 
     Consent is checked here, on every submission, before a single field
-    is read. Granted -> `html_form_submit` carries `user_data`. Denied, or no
-    readable signal at all -> `html_form_submit` fires with the form id and
-    name only, and nothing personal is read, hashed or pushed.
+    is read. Granted -> `html_form_submit` carries `user_data`. Denied ->
+    `html_form_submit` fires with the form id and name only, and nothing
+    personal is read, hashed or pushed.
+
+    No readable signal at all is the case that needs a decision, because
+    "this site has no CMP" and "this site has a CMP that never emits" look
+    the same from here. CONSENT_MODE is where you state which it is.
 
     That covers withdrawal mid-session too, which a GTM tag-level check
     cannot: the listener lives for the whole page, so consent has to be
@@ -44,6 +50,27 @@
     keeping hashed personal data out of window.dataLayer, which every
     other tag in the container and every third-party script on the page
     can read regardless of what Google Ads decides.
+
+    The conversion is never the thing being gated. `html_form_submit`
+    fires on every visitor submission in every case above — only the
+    `user_data` payload is withheld. Anything that suppresses the event
+    itself is a bug, not a stricter reading of consent.
+
+  WHAT user_data_status MEANS
+
+    collected             user_data attached, after a positive signal
+    collected_undeclared  user_data attached because CONSENT_MODE = 'none'
+    consent_denied        a signal said no
+    no_consent_signal     CONSENT_MODE = 'cmp' and nothing emitted a signal
+    no_fields             consent fine, nothing on the form to match on
+    no_crypto             SubtleCrypto missing, so not a secure context
+    error                 hashing or assembly threw
+
+    `cmp_detected` is added alongside the two no-signal statuses, naming
+    the CMP found on the page when nothing readable said yes or no. With
+    no_consent_signal it names what to go and wire up; with
+    collected_undeclared it means the site declared 'none' and was wrong.
+    Either way, treat it as a bug report about the install.
 
 */
 
@@ -60,11 +87,23 @@
   // Skip any form containing a password field (login / registration).
   var SKIP_PASSWORD_FORMS = true;
 
-  // When no ad_user_data signal can be found, treat that as denied rather
-  // than granted. Leave this on for UK/EU traffic. Turning it off means a
-  // site with no Consent Mode v2 will still collect, so only do that if
-  // you have another lawful basis and know what it is.
-  var REQUIRE_EXPLICIT_CONSENT = true;
+  // Does this site have a consent management platform?
+  //
+  //   'cmp'  — yes. An ad_user_data signal is required. No signal means the
+  //            CMP is not wired to Consent Mode v2, so nothing is collected.
+  //   'none' — no. Nothing on the page gates collection and you have a
+  //            lawful basis, so collect when no signal is present.
+  //
+  // A signal always wins where there is one: 'none' still honours a denial
+  // if a CMP turns up and says no.
+  //
+  // This has to be declared because it cannot be worked out. "No CMP here"
+  // and "a CMP that never emits Consent Mode" are the same absence of a
+  // signal, and JavaScript cannot tell them apart. Declaring which one you
+  // are in is what lets the script complain about the second — see
+  // CMP_SIGNATURES. Get it wrong in the 'none' direction on a site that
+  // does have a banner and you collect from people who declined.
+  var CONSENT_MODE = 'cmp';
 
   // Report forms the site cancels and posts over XHR itself — the normal
   // shape of a WordPress form plugin. Leave this on: with it off, a site
@@ -270,28 +309,98 @@
      ad_user_data is the current state. Override with
      window.formTrackingConsentFn if your CMP does something unusual.    */
 
+  /*
+    Known CMPs, by the cheapest reliable fingerprint each one leaves on the
+    page. This list exists for exactly one purpose: to contradict
+    CONSENT_MODE = 'none'. It never decides whether to collect.
+
+    That distinction is the whole point. A fingerprint list is always
+    incomplete — a custom banner or a CMP added next year will not be on it
+    — which makes it unfit to grant or deny anything. It is perfectly fit
+    to catch someone declaring 'none' on a site that visibly has a banner,
+    because a hit is conclusive even though a miss is not.
+  */
+  var CMP_SIGNATURES = [
+    ['CookieYes', function () {
+      return !!window.getCkyConsent ||
+             !!document.querySelector('script[src*="cookieyes"]');
+    }],
+    ['OneTrust', function () {
+      return !!window.OneTrust || !!window.Optanon;
+    }],
+    ['Cookiebot', function () {
+      return !!window.Cookiebot || !!document.getElementById('Cookiebot');
+    }],
+    ['HubSpot', function () {
+      return !!document.querySelector(
+        'script[src*="hs-banner.com"], script[id^="cookieBanner-"]');
+    }],
+    ['Complianz', function () {
+      return !!window.cmplz_get_cookie ||
+             !!document.querySelector('script[src*="complianz"]');
+    }],
+    ['Termly', function () {
+      return !!document.querySelector('script[src*="termly"]');
+    }],
+    ['Iubenda', function () {
+      return !!window._iub;
+    }],
+    ['Usercentrics', function () {
+      return !!window.UC_UI || !!window.usercentrics;
+    }],
+    ['Osano', function () {
+      return !!window.Osano;
+    }],
+    ['IAB TCF', function () {
+      return typeof window.__tcfapi === 'function';
+    }]
+  ];
+
+  function detectCmp() {
+    for (var i = 0; i < CMP_SIGNATURES.length; i++) {
+      try {
+        if (CMP_SIGNATURES[i][1]()) return CMP_SIGNATURES[i][0];
+      } catch (err) {
+        // A CMP that throws when probed is not worth failing a submission
+        // over. Treat it as absent and keep checking the rest.
+      }
+    }
+    return null;
+  }
+
   var warnedNoConsentSignal = false;
+  var warnedCmpContradiction = false;
+
+  // Deliberately not behind DEBUG. Silence in either of these cases looks
+  // identical to "enhanced conversions is working", which is the failure
+  // this whole script exists to stop.
+  function warnOnce(already, message) {
+    if (already || !window.console || !console.warn) return true;
+    try { console.warn('[form-tracking] ' + message); } catch (err) {}
+    return true;
+  }
 
   /*
-    Returns true only on a positive, unambiguous grant. Every other
-    outcome — no signal, an unreadable shape, a dataLayer that has been
-    reset — resolves to denied when REQUIRE_EXPLICIT_CONSENT is on.
+    Reads the current consent position without judging it: 'granted',
+    'denied', or 'no_signal' when nothing readable said either way.
 
-    That direction matters. An earlier version defaulted to granted on
-    anything it could not read, which meant a CMP whose updates never
-    landed in the dataLayer in the expected shape looked exactly like
-    consent. A control that fails open while its documentation says it
-    fails closed is worse than no control.
+    Every unreadable outcome — a malformed shape, a dataLayer that has been
+    reset, a region-scoped entry we cannot place — reports 'no_signal'
+    rather than guessing. What that means is CONSENT_MODE's decision, made
+    in consentDecision() below, and it is the only place the two are
+    allowed to be conflated.
   */
-  function consentGranted() {
+  function consentState() {
     if (typeof window.formTrackingConsentFn === 'function') {
       try {
         // Strict equality on purpose: the natural way to write a CMP
-        // adapter returns undefined on its deny branch.
-        return window.formTrackingConsentFn() === true;
+        // adapter returns undefined on its deny branch. Note that defining
+        // the function is itself a declaration, so there is no 'no_signal'
+        // outcome on this path — an adapter that cannot tell should throw.
+        return window.formTrackingConsentFn() === true ? 'granted' : 'denied';
       } catch (err) {
         log('consent function threw, treating as denied', err);
-        return false;
+        return 'denied';
       }
     }
 
@@ -318,24 +427,58 @@
       }
     }
 
-    if (state === null) {
-      if (!REQUIRE_EXPLICIT_CONSENT) return true;
-      if (!warnedNoConsentSignal && window.console && console.warn) {
-        warnedNoConsentSignal = true;
-        // Deliberately not behind DEBUG. Silence here looks identical to
-        // "enhanced conversions is working", which is the failure this
-        // whole script exists to stop.
-        try {
-          console.warn('[form-tracking] no ad_user_data consent signal found in ' +
-            'the dataLayer, so user-provided data was not collected. Configure ' +
-            'Consent Mode v2, set window.formTrackingConsentFn, or set ' +
-            'REQUIRE_EXPLICIT_CONSENT = false if you have another lawful basis.');
-        } catch (err) {}
+    if (state === null) return 'no_signal';
+    return state ? 'granted' : 'denied';
+  }
+
+  /*
+    Turns that reading into a decision, given what the site declared.
+
+      granted   -> collect, whatever CONSENT_MODE says
+      denied    -> do not, whatever CONSENT_MODE says
+      no_signal -> CONSENT_MODE decides
+
+    A present signal winning in both directions is what makes 'none' safe
+    to set on a site that later acquires a CMP: the declaration only ever
+    governs the silence.
+
+    Returns { collect, status, cmp }. `cmp` is set only where there was no
+    signal to read, and it rides on the payload so the state is visible in
+    GTM rather than only in a console nobody has open. A named CMP next to
+    a missing signal is the difference between "something is wrong" and
+    "go and wire this specific thing up".
+  */
+  function consentDecision() {
+    var state = consentState();
+
+    if (state === 'granted') return { collect: true,  status: 'collected',      cmp: null };
+    if (state === 'denied')  return { collect: false, status: 'consent_denied', cmp: null };
+
+    // No readable signal. Whichever way CONSENT_MODE resolves that, whether
+    // a CMP is sitting on the page is the fact that tells you what to fix,
+    // so look either way — it just means different things in each.
+    var cmp = detectCmp();
+
+    if (CONSENT_MODE === 'none') {
+      if (cmp) {
+        warnedCmpContradiction = warnOnce(warnedCmpContradiction,
+          'CONSENT_MODE is "none" but ' + cmp + ' is on this page. User data ' +
+          'is being collected without checking it. Either wire ' + cmp + ' to ' +
+          'Consent Mode v2, point window.formTrackingConsentFn at it, or set ' +
+          'CONSENT_MODE = "cmp".');
       }
-      return false;
+      return { collect: true, status: 'collected_undeclared', cmp: cmp };
     }
 
-    return state;
+    warnedNoConsentSignal = warnOnce(warnedNoConsentSignal, cmp
+      ? cmp + ' is on this page but is not emitting an ad_user_data signal, ' +
+        'so user-provided data was not collected. Wire ' + cmp + ' to Consent ' +
+        'Mode v2, or point window.formTrackingConsentFn at it.'
+      : 'no ad_user_data consent signal found in the dataLayer, so ' +
+        'user-provided data was not collected. Configure Consent Mode v2, set ' +
+        'window.formTrackingConsentFn, or set CONSENT_MODE = "none" if this ' +
+        'site has no CMP and you have another lawful basis.');
+    return { collect: false, status: 'no_consent_signal', cmp: cmp };
   }
 
   /* ── Normalisation ──────────────────────────────────────────────────
@@ -793,24 +936,49 @@
   STATE.handlers.push(function (form) {
     var details = formDetails(form);
 
+    /*
+      Every push carries user_data_status, including the successful one.
+
+      Before this existed, four different outcomes — consent denied, no CMP
+      signal at all, no matchable field on the form, no SubtleCrypto —
+      pushed a byte-identical event, so a broken install and a form with
+      nothing to match on were indistinguishable downstream. A live site ran
+      that way for months: 342 of 365 conversions arrived with no user data
+      and the only trace was a console warning nobody was looking at.
+    */
+    var push = function (status, cmp, userData) {
+      var payload = {
+        event: EVENT_NAME,
+        form_details: details,
+        user_data_status: status
+      };
+      if (cmp) payload.cmp_detected = cmp;
+      if (userData) payload.user_data = userData;
+      return pushAndWait(payload);
+    };
+
+    // Read before consent is: with no SubtleCrypto nothing can be hashed,
+    // so there is no personal data for consent to have an opinion about.
+    if (!CAN_HASH) return push('no_crypto', null, null);
+
     // Consent is read per submission, before any field is touched. GTM
     // gates a tag once, when it decides to run it; the listener installed
     // here outlives that decision, so withdrawal has to be caught at the
     // moment of use.
-    if (!CAN_HASH || !consentGranted()) {
-      return pushAndWait({ event: EVENT_NAME, form_details: details });
-    }
+    var decision = consentDecision();
+    if (!decision.collect) return push(decision.status, decision.cmp, null);
 
     var raw = readUserData(form);
-    if (!raw) return pushAndWait({ event: EVENT_NAME, form_details: details });
+    if (!raw) return push('no_fields', decision.cmp, null);
 
     return buildUserData(raw).then(function (userData) {
-      var payload = { event: EVENT_NAME, form_details: details };
-      if (userData) payload.user_data = userData;
-      return pushAndWait(payload);
+      // buildUserData returns null when nothing survived normalisation, or
+      // when what did survive is not enough for Google to match on.
+      if (!userData) return push('no_fields', decision.cmp, null);
+      return push(decision.status, decision.cmp, userData);
     })['catch'](function (err) {
       log('user data failed, falling back to the plain event', err);
-      return pushAndWait({ event: EVENT_NAME, form_details: details });
+      return push('error', decision.cmp, null);
     });
   });
 
