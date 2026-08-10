@@ -109,6 +109,32 @@ Google needs at least an email, a phone number, or a complete address (first nam
 postal code and country). If none of those are present the `user_data` object is dropped and
 you get a bare `html_form_submit`.
 
+### The address block is all four or none
+
+`address` is sent only when first name, last name, postal code **and** country are all present. Miss
+any one and the entire block is withheld — including street, city and region.
+
+That is Google's rule, not a choice made here. Send three of the four and it discards the lot and
+reports *"your enhanced conversions addresses are missing required fields"* in the diagnostics
+panel. So a partial address is not partial credit, it is zero credit and a warning. Up to 1.4 this
+sent whatever it had, which is how that warning turned up on a live account.
+
+Email and phone are unaffected — they are separate identifiers and go regardless. A form with an
+email and half an address still sends the email.
+
+**Country is the one that will bite you.** Almost no lead form asks for it, so a form collecting
+name, phone and postcode — the standard UK enquiry shape — has three of the four and sends no
+address at all. If the site's enquiries genuinely come from one country, set:
+
+```js
+var ASSUME_DEFAULT_COUNTRY = true;
+```
+
+and country is filled from `DEFAULT_COUNTRY` when it is missing. It is an assumption, so it is off
+by default, but the downside is small: a wrong country means the address fails to match, which is
+exactly where it was already. Leave it off if the site takes enquiries from anywhere and you would
+rather send nothing than guess.
+
 Field names are matched exactly against the allowlist, retried at each level as common prefixes
 are stripped. So `your-email`, `billing_email` and `email` all resolve to email, Elementor's
 `form_fields[email]` and Shopify's `address[zip]` resolve too, and `address_1` still resolves to

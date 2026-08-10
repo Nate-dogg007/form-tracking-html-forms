@@ -93,6 +93,18 @@
   // Skip any form containing a password field (login / registration).
   var SKIP_PASSWORD_FORMS = true;
 
+  // Google will not use an address unless it has first name, last name,
+  // postcode AND country. Most lead forms collect the first three and never
+  // ask for country, so the address is discarded for want of one value that
+  // is the same for every visitor the site has.
+  //
+  // Turn this on to fill country from DEFAULT_COUNTRY when it is the only
+  // field missing. It is an assumption, so it is off by default — but the
+  // cost of a wrong one is only that the address fails to match, which is
+  // where it already was. Leave it off if the site takes enquiries from
+  // everywhere and you would rather send nothing than guess.
+  var ASSUME_DEFAULT_COUNTRY = false;
+
   // Does this site have a consent management platform?
   //
   //   'cmp'  — yes. An ad_user_data signal is required. No signal means the
@@ -992,13 +1004,37 @@
         if (raw[key]) address[key] = raw[key];
       });
 
-      for (var k in address) {
-        if (address.hasOwnProperty(k)) { userData.address = address; break; }
+      /*
+        Country is the field nobody asks for. A UK enquiry form collects a
+        name and a postcode and stops, so the set is one value short of
+        usable and the value it is short of is the same for every visitor
+        the site has.
+
+        Only the country is ever assumed. Guarding this on the rest of the
+        set being present would read as extra safety and be dead code — the
+        completeness test below already discards an address that is short
+        of anything, so stamping a country onto one that is going to be
+        dropped changes nothing.
+      */
+      if (ASSUME_DEFAULT_COUNTRY && !address.country) {
+        var assumed = normalise('country', DEFAULT_COUNTRY);
+        if (assumed) address.country = assumed;
       }
 
-      // Google needs at least an email, a phone, or a usable address.
+      /*
+        Google's address block is all or nothing: first name, last name,
+        postcode and country together, or it discards the whole thing and
+        reports "your enhanced conversions addresses are missing required
+        fields" in the diagnostics panel.
+
+        So a partial address is not a partial benefit — it is zero benefit
+        and a warning. Worse, it is hashed personal data pushed into a
+        page-global array for nothing, which is precisely what the rest of
+        this file works to avoid. Send the set or send none of it.
+      */
       var hasAddress = !!(address.sha256_first_name && address.sha256_last_name &&
                           address.postal_code && address.country);
+      if (hasAddress) userData.address = address;
       if (!userData.sha256_email_address && !userData.sha256_phone_number && !hasAddress) {
         log('no matchable identifier, dropping user_data');
         return null;
