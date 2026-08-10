@@ -314,6 +314,16 @@ const PAGES = {
       <button type="submit">Send</button>
     </form>`),
 
+  // A field that matches, but not enough of them for Google to match on:
+  // exercises buildUserData() returning null, which is a different route to
+  // no_fields than a form with nothing recognisable on it at all.
+  '/partial-identifier': page(`
+    <iframe name="sink" style="display:none"></iframe>
+    <form id="partial" action="/thanks" method="get" target="sink">
+      <input name="first_name" value="Jane">
+      <button type="submit">Send</button>
+    </form>`),
+
   '/thanks': page('<h1>thanks</h1>')
 };
 
@@ -390,6 +400,9 @@ async function run(path, installs = 1, act, opts = {}) {
     await pg.addInitScript(`window.dataLayer.push(['consent','default',
       { ad_user_data: 'granted', ad_storage: 'granted' }]);`);
   }
+  // Runs before the tag installs — the only way to reach anything the script
+  // decides once, at install, such as whether SubtleCrypto exists.
+  if (opts.preScript) await pg.addInitScript(opts.preScript);
   // injectAfterLoad models GTM running the tag on a consent update, after
   // the DOM already exists, rather than at document-start.
   if (!opts.injectAfterLoad) {
@@ -1016,6 +1029,65 @@ console.log('\nuser_data_status says why');
     check(`event still fires: ${label}`, submissions.length === 1,
       `got ${submissions.length}`);
   }
+}
+
+/*
+  A status nobody asserts is a status nobody can trust. Typo either of these
+  literals in the source and the rest of the suite still reports green, which
+  is the same blind spot the status field exists to close.
+*/
+console.log('\nthe hashing failure paths report, rather than disappearing');
+{
+  const { submissions } = await run('/consent', 1, null, {
+    preScript: `Object.defineProperty(window, 'crypto', { value: {}, configurable: true });`
+  });
+  check("no SubtleCrypto reports 'no_crypto'",
+    submissions[0]?.user_data_status === 'no_crypto', submissions[0]?.user_data_status);
+  check('and the event still fires', submissions.length === 1, `got ${submissions.length}`);
+  check('and nothing personal rides along', !submissions[0]?.user_data);
+}
+{
+  // An async crypto failure is already swallowed by sha256Hex, so the hashes
+  // come back empty and there is nothing left to match on.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.crypto.subtle.digest = function () {
+      return Promise.reject(new Error('crypto disabled')); }`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(400);
+  });
+  check("a rejecting digest() reports 'no_fields'",
+    submissions[0]?.user_data_status === 'no_fields', submissions[0]?.user_data_status);
+  check('and the event still fires', submissions.length === 1, `got ${submissions.length}`);
+}
+{
+  // Regression. A synchronous throw goes past .catch, out of the handler and
+  // into the DOM hook's try/catch, which pushed NOTHING — the submission
+  // disappeared entirely. Some privacy extensions replace crypto.subtle with
+  // exactly this shape.
+  for (const [label, patch] of [
+    ['digest() throws synchronously',
+      `window.crypto.subtle.digest = function () { throw new Error('blocked'); }`],
+    ['digest() returns a non-promise',
+      `window.crypto.subtle.digest = function () { return undefined; }`]
+  ]) {
+    const { submissions } = await run('/consent', 1, async (p) => {
+      await p.evaluate(patch);
+      await p.click('button[type=submit]');
+      await p.waitForTimeout(400);
+    });
+    check(`${label} still fires the conversion`, submissions.length === 1,
+      `got ${submissions.length}`);
+    check(`${label} reports 'error'`,
+      submissions[0]?.user_data_status === 'error', submissions[0]?.user_data_status);
+    check(`${label} carries no user_data`, !submissions[0]?.user_data);
+  }
+}
+{
+  // The other route to no_fields: fields matched, but not enough of them.
+  const { submissions } = await run('/partial-identifier', 1);
+  check("a lone first_name reports 'no_fields', not a partial user_data",
+    submissions[0]?.user_data_status === 'no_fields' && !submissions[0]?.user_data,
+    JSON.stringify(submissions[0]));
 }
 
 console.log('\nCMP detection contradicts the declaration, never decides it');

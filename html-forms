@@ -993,7 +993,28 @@
     var raw = readUserData(form);
     if (!raw) return push('no_fields', decision.cmp, null);
 
-    return buildUserData(raw).then(function (userData) {
+    /*
+      buildUserData can throw synchronously as well as reject, and the two
+      need different handling. `.catch` only exists once a promise has been
+      returned, so a synchronous throw goes straight past it, out of this
+      handler, and into the caller's try/catch at the DOM hook — which logs
+      under DEBUG and moves on, pushing no event at all.
+
+      That is not theoretical: a browser extension that replaces
+      crypto.subtle with something whose digest() throws, or returns a
+      non-promise, produced exactly that. The submission disappeared. It
+      breaks the invariant this file states twice, so catch it here where
+      the fallback event can still be pushed.
+    */
+    var building;
+    try {
+      building = buildUserData(raw);
+    } catch (err) {
+      log('user data threw synchronously, falling back to the plain event', err);
+      return push('error', decision.cmp, null);
+    }
+
+    return building.then(function (userData) {
       // buildUserData returns null when nothing survived normalisation, or
       // when what did survive is not enough for Google to match on.
       if (!userData) return push('no_fields', decision.cmp, null);
