@@ -24,7 +24,7 @@ const SOURCE = readFileSync(join(HERE, '..', 'html-forms'), 'utf8')
 const EVENT_NAME = 'html_form_submit';
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
-const script = (country, consentMode) => {
+const script = (country, consentMode, assumeCountry) => {
   let out = SOURCE;
   if (country) {
     const cflag = `var DEFAULT_COUNTRY = '${country}';`;
@@ -35,6 +35,11 @@ const script = (country, consentMode) => {
     const mflag = `var CONSENT_MODE = '${consentMode}';`;
     out = out.replace(/var CONSENT_MODE = '[a-z]+';/, mflag);
     if (!out.includes(mflag)) throw new Error('could not set CONSENT_MODE');
+  }
+  if (assumeCountry) {
+    const aflag = 'var ASSUME_DEFAULT_COUNTRY = true;';
+    out = out.replace(/var ASSUME_DEFAULT_COUNTRY = false;/, aflag);
+    if (!out.includes(aflag)) throw new Error('could not set ASSUME_DEFAULT_COUNTRY');
   }
   return out;
 };
@@ -229,9 +234,15 @@ const PAGES = {
 
   '/other': page('<h1>other</h1>'),
 
+  // Carries a complete address set on purpose: city and region only reach
+  // Google alongside one, so testing them without it would assert nothing.
   '/explicit-place': page(`
     <form id="ep" action="/thanks" method="get">
       <input name="email" value="ep@example.com">
+      <input name="first_name" value="Ellie">
+      <input name="last_name"  value="Place">
+      <input name="postcode"   value="SO99 9XX">
+      <input name="country"    value="GB">
       <input name="town"     data-upd="city"   value="Southampton">
       <input name="the_area" data-upd="region" value="Hampshire">
       <button type="submit">Send</button>
@@ -252,9 +263,15 @@ const PAGES = {
       <button type="submit">Send</button>
     </form>`),
 
+  // Complete address set, so the block genuinely exists and the exclusions
+  // below are asserting something rather than passing on an absent object.
   '/free-text-region': page(`
     <form id="ftr" action="/thanks" method="get">
       <input name="email" value="ft@example.com">
+      <input name="first_name" value="Freda">
+      <input name="last_name"  value="Text">
+      <input name="postcode"   value="SO99 9XX">
+      <input name="country"    value="GB">
       <input name="state" value="I am currently signed off sick with depression">
       <input name="city"  value="Southampton">
       <button type="submit">Send</button>
@@ -266,15 +283,23 @@ const PAGES = {
       <input name="form_fields[name]"   value="Elle Mentor">
       <input name="mobilephone"         value="07700 900123">
       <input name="address[zip]"        value="SO99 9XX">
+      <input name="address[country]"    value="GB">
       <input name="address[province]"   value="Hampshire">
       <input name="address[address1]"   value="123 New Rd">
       <button type="submit">Send</button>
     </form>`),
 
+  // form_name comes FIRST and a real name second, so "first match wins"
+  // means a broken NEVER_MATCH guard would hash the form's title instead of
+  // the visitor. The address is complete on purpose — without it the block
+  // is withheld and the assertion has nothing to inspect.
   '/form-name': page(`
     <form id="fn" action="/thanks" method="get">
       <input type="text" name="form_name" value="Contact Enquiry Form">
-      <input name="email" value="fn@example.com">
+      <input name="name"     value="Rita Skeeter">
+      <input name="email"    value="fn@example.com">
+      <input name="postcode" value="SO99 9XX">
+      <input name="country"  value="GB">
       <button type="submit">Send</button>
     </form>`),
 
@@ -321,6 +346,68 @@ const PAGES = {
     <iframe name="sink" style="display:none"></iframe>
     <form id="partial" action="/thanks" method="get" target="sink">
       <input name="first_name" value="Jane">
+      <button type="submit">Send</button>
+    </form>`),
+
+  // Name and street, but no postcode and no country: the address set cannot
+  // be completed, so none of it should go.
+  '/partial-address': page(`
+    <form id="pa" action="/thanks" method="get">
+      <input name="email"      value="pa@example.com">
+      <input name="first_name" value="Partial">
+      <input name="last_name"  value="Address">
+      <input name="address_1"  value="123 New Rd">
+      <button type="submit">Send</button>
+    </form>`),
+
+  // The common UK lead form: name, postcode, phone — and nobody ever asks
+  // for country. This is the shape that produced the live warning.
+  '/no-country': page(`
+    <form id="nc" action="/thanks" method="get">
+      <input name="name"     value="Nora Country">
+      <input name="phone"    value="07700 900123">
+      <input name="postcode" value="SO99 9XX">
+      <button type="submit">Send</button>
+    </form>`),
+
+  // No email, no phone. A complete address is a matchable identifier on its
+  // own and must survive the all-or-nothing rule.
+  '/address-only': page(`
+    <form id="ao" action="/thanks" method="get">
+      <input name="first_name" value="Adam">
+      <input name="last_name"  value="Only">
+      <input name="postcode"   value="SO99 9XX">
+      <input name="country"    value="United Kingdom">
+      <button type="submit">Send</button>
+    </form>`),
+
+  // Each of the four required address fields, missing one at a time. Only
+  // country and postcode were isolated before, so dropping the first_name or
+  // last_name clause from the completeness test changed nothing.
+  '/no-first-name': page(`
+    <form id="nf" action="/thanks" method="get">
+      <input name="last_name" value="Smith">
+      <input name="postcode"  value="SO99 9XX">
+      <input name="country"   value="GB">
+      <button type="submit">Send</button>
+    </form>`),
+
+  '/no-last-name': page(`
+    <form id="nl" action="/thanks" method="get">
+      <input name="first_name" value="Jane">
+      <input name="postcode"   value="SO99 9XX">
+      <input name="country"    value="GB">
+      <button type="submit">Send</button>
+    </form>`),
+
+  // A country the alias table does not carry. The visitor answered; we just
+  // could not read it. That is not the same as not asking.
+  '/unrecognised-country': page(`
+    <form id="uc" action="/thanks" method="get">
+      <input name="first_name" value="Nikos">
+      <input name="last_name"  value="Papadopoulos">
+      <input name="postcode"   value="10431">
+      <select name="country"><option value="Greece" selected>Greece</option></select>
       <button type="submit">Send</button>
     </form>`),
 
@@ -406,12 +493,12 @@ async function run(path, installs = 1, act, opts = {}) {
   // injectAfterLoad models GTM running the tag on a consent update, after
   // the DOM already exists, rather than at document-start.
   if (!opts.injectAfterLoad) {
-      for (let i = 0; i < installs; i++) await pg.addInitScript(script(opts.country, opts.consentMode));
+      for (let i = 0; i < installs; i++) await pg.addInitScript(script(opts.country, opts.consentMode, opts.assumeCountry));
   }
   await pg.goto(`${BASE}${path}`);
   if (opts.injectAfterLoad) {
     for (let i = 0; i < installs; i++) {
-      await pg.addScriptTag({ content: script(opts.country, opts.consentMode) });
+      await pg.addScriptTag({ content: script(opts.country, opts.consentMode, opts.assumeCountry) });
     }
   }
   await (act || (async (p) => { await p.click('button[type=submit]'); }))(pg);
@@ -708,6 +795,20 @@ console.log('\nregion-scoped consent cannot be resolved in a browser');
     submissions[0]?.user_data_status);
 }
 {
+  // region: [] is truthy in JavaScript. Some CMPs emit it instead of
+  // omitting the key, and it was collapsing a readable global default into
+  // region_unresolved.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+      { ad_user_data: 'granted', region: [] }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('an empty region array is not region-scoped',
+    submissions[0]?.user_data_status === 'collected' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
   // A region-scoped entry about a DIFFERENT consent type must not poison
   // the read — otherwise almost every EEA site fails closed for no reason.
   const { submissions } = await run('/consent', 1, async (p) => {
@@ -884,8 +985,18 @@ console.log('\nplace fields require an explicit opt-in');
   // into first/last poisons the match data with something not a person.
   const { submissions } = await run('/form-name', 1);
   const addr = submissions[0]?.user_data?.address || {};
+  /*
+    Asserted positively — that first/last are the REAL visitor's — rather
+    than by the absence of the form title's hash. An earlier version checked
+    the whole payload for those hashes, which could never fail: the fixture
+    had no postcode or country, so the address block was withheld and there
+    was nothing for a leak to appear in.
+  */
   check('form_name is never read as the visitor’s name',
-    !addr.sha256_first_name && !addr.sha256_last_name, JSON.stringify(addr));
+    addr.sha256_first_name === sha256('rita') &&
+    addr.sha256_last_name === sha256('skeeter'), JSON.stringify(addr));
+  check('and the form title appears nowhere in the payload',
+    !['contact', 'enquiry', 'form'].some((t) => JSON.stringify(submissions).includes(sha256(t))));
   check('the real name field still works', 
     submissions[0]?.user_data?.sha256_email_address === sha256('fn@example.com'));
 }
@@ -1328,6 +1439,111 @@ console.log('\nCMP detection contradicts the declaration, never decides it');
   check('a CMP that throws when probed does not break the event',
     submissions.length === 1 && submissions[0]?.user_data_status === 'no_consent_signal',
     JSON.stringify(submissions[0]));
+}
+
+/*
+  Google's address block needs first name, last name, postcode and country
+  together or it discards the lot and reports "addresses are missing required
+  fields". A partial one is not partial credit — it is zero credit, a warning
+  in the diagnostics panel, and hashed personal data pushed into a page-global
+  array for nothing in return.
+*/
+console.log('\nthe address block is all four fields or none');
+{
+  const { submissions } = await run('/partial-address', 1);
+  const ud = submissions[0]?.user_data || {};
+  check('a name and street with no postcode or country send no address',
+    !ud.address, JSON.stringify(ud.address));
+  check('and the email still goes, so the lead is not lost',
+    ud.sha256_email_address === sha256('pa@example.com'), JSON.stringify(ud));
+}
+{
+  // The common UK lead form, and the exact shape that produced the live
+  // diagnostics warning.
+  const { submissions } = await run('/no-country', 1);
+  const ud = submissions[0]?.user_data || {};
+  check('name + postcode but no country sends no address',
+    !ud.address, JSON.stringify(ud.address));
+  check('and the phone still goes',
+    ud.sha256_phone_number === sha256('+447700900123'), JSON.stringify(ud));
+}
+{
+  const { submissions } = await run('/no-country', 1, null, { assumeCountry: true });
+  const addr = submissions[0]?.user_data?.address || {};
+  check('ASSUME_DEFAULT_COUNTRY makes the same form send an address',
+    addr.country === 'GB', JSON.stringify(addr));
+  check('and the set is genuinely complete, not just country-stamped',
+    !!(addr.sha256_first_name && addr.sha256_last_name && addr.postal_code),
+    JSON.stringify(addr));
+}
+{
+  /*
+    An outcome test, and worth being clear about what it does and does not
+    pin down: turning the flag on must not send a set that is still short.
+    It cannot tell you WHICH line enforced that, because the completeness
+    test is the only thing that does — an earlier draft guarded the country
+    assumption on the rest of the set as well, and this test passed
+    identically with that guard removed, which is how the dead code was
+    found.
+  */
+  const { submissions } = await run('/partial-address', 1, null, { assumeCountry: true });
+  check('ASSUME_DEFAULT_COUNTRY does not rescue a form with no postcode',
+    !submissions[0]?.user_data?.address,
+    JSON.stringify(submissions[0]?.user_data?.address));
+}
+{
+  // The complete case still works, or this has just turned addresses off.
+  const { submissions } = await run('/contact', 1);
+  const addr = submissions[0]?.user_data?.address || {};
+  check('a form carrying all four still sends the address',
+    !!(addr.sha256_first_name && addr.sha256_last_name &&
+       addr.postal_code === 'so99 9xx' && addr.country === 'GB'),
+    JSON.stringify(addr));
+}
+{
+  // No email, no phone: a complete address is a matchable identifier on its
+  // own and must not be dropped as "no fields".
+  const { submissions } = await run('/address-only', 1);
+  const ud = submissions[0]?.user_data || {};
+  check('a complete address with no email or phone is still collected',
+    !!ud.address && ud.address.country === 'GB', JSON.stringify(ud));
+  check("and it reports 'collected', not 'no_fields'",
+    submissions[0]?.user_data_status === 'collected', submissions[0]?.user_data_status);
+}
+
+
+{
+  const { submissions } = await run('/no-first-name', 1);
+  check('a missing first name withholds the address',
+    !submissions[0]?.user_data?.address,
+    JSON.stringify(submissions[0]?.user_data?.address));
+}
+{
+  const { submissions } = await run('/no-last-name', 1);
+  check('a missing last name withholds it too',
+    !submissions[0]?.user_data?.address,
+    JSON.stringify(submissions[0]?.user_data?.address));
+}
+{
+  /*
+    The one that matters most. A visitor who ANSWERED the country question
+    must never have that answer replaced by the site default, even when the
+    answer is one the alias table cannot read — otherwise their hashed name
+    and real postcode go out attached to a country they have never been to,
+    which cannot match and is exactly the disclosure this rule exists to stop.
+  */
+  const { submissions } = await run('/unrecognised-country', 1, null,
+    { assumeCountry: true });
+  check('an unreadable country answer is not overwritten with the default',
+    !submissions[0]?.user_data?.address,
+    JSON.stringify(submissions[0]?.user_data?.address));
+}
+{
+  // ...while a form that never asked is still filled, which is the point.
+  const { submissions } = await run('/no-country', 1, null, { assumeCountry: true });
+  check('a form that never asked for country is still completed',
+    submissions[0]?.user_data?.address?.country === 'GB',
+    JSON.stringify(submissions[0]?.user_data?.address));
 }
 
 /* ── Result ──────────────────────────────────────────────────────────── */

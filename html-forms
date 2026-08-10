@@ -26,8 +26,15 @@
   ─────────────────────────────────────────────────────────────
   HOW TO INSTALL
 
-    ONE GTM Custom HTML tag. Paste this whole file in, set
-    DEFAULT_COUNTRY and CONSENT_MODE below, trigger it on All Pages, save.
+    ONE GTM Custom HTML tag. Paste this whole file in, set the three
+    constants in CONFIG below — DEFAULT_COUNTRY, CONSENT_MODE and
+    ASSUME_DEFAULT_COUNTRY — trigger it on All Pages, save.
+
+    CONSENT_MODE decides whether anything is collected at all when the page
+    emits no consent signal. ASSUME_DEFAULT_COUNTRY is the one most sites
+    need and nobody expects: Google throws an address away unless it has
+    first name, last name, postcode AND country, and almost no lead form
+    asks for country. Leave it false and most forms send no address.
     That is it. There is no second tag.
 
   CONSENT
@@ -92,6 +99,18 @@
 
   // Skip any form containing a password field (login / registration).
   var SKIP_PASSWORD_FORMS = true;
+
+  // Google will not use an address unless it has first name, last name,
+  // postcode AND country. Most lead forms collect the first three and never
+  // ask for country, so the address is discarded for want of one value that
+  // is the same for every visitor the site has.
+  //
+  // Turn this on to fill country from DEFAULT_COUNTRY when it is the only
+  // field missing. It is an assumption, so it is off by default — but the
+  // cost of a wrong one is only that the address fails to match, which is
+  // where it already was. Leave it off if the site takes enquiries from
+  // everywhere and you would rather send nothing than guess.
+  var ASSUME_DEFAULT_COUNTRY = false;
 
   // Does this site have a consent management platform?
   //
@@ -458,7 +477,11 @@
 
           Region-scoped defaults are noted, not read — see below.
         */
-        if (command === 'default' && settings.region) {
+        // Length-checked, not just truthy: some CMPs emit `region: []`
+        // rather than omitting the key, and an empty array is truthy in
+        // JavaScript — which turned a perfectly readable global default
+        // into region_unresolved and collected nothing.
+        if (command === 'default' && settings.region && settings.region.length) {
           sawRegionScoped = true;
           continue;
         }
@@ -679,9 +702,12 @@
 
   function normPostal(v) {
     // Collapse internal whitespace rather than stripping it. Google
-    // normalises postal codes itself and its own worked example keeps the
-    // space (SO99 9XX), so there is nothing to gain from a lossier
-    // transform on the one address key UK matching leans on.
+    // documents no normalisation for postal codes — they are sent in the
+    // clear and matched on the raw string — so there is nothing to gain
+    // from a lossier transform on the one address key UK matching leans on.
+    // (An earlier version of this comment cited a Google worked example
+    // keeping the space. That example could not be found; the reasoning
+    // stands without it.)
     var s = String(v).trim().toLowerCase().replace(/\s+/g, ' ');
     if (!s || s.length > 12 || s.indexOf('@') !== -1) return '';
     return s;
@@ -955,6 +981,15 @@
       }
 
       if (raw[key]) continue;                       // first match wins
+      /*
+        Noted before validation, because "no country field" and "a country
+        field we could not read" have to be told apart. They both leave
+        raw.country unset, and ASSUME_DEFAULT_COUNTRY must only fill the
+        first — a visitor who answered Greece, which is not in the alias
+        table, would otherwise have their answer replaced with the site
+        default and their address sent somewhere they have never been.
+      */
+      if (key === 'country') raw.country_supplied = true;
       var norm = normalise(key, value);
       if (!norm) continue;                          // failed validation, drop it
       raw[key] = norm;
@@ -992,13 +1027,45 @@
         if (raw[key]) address[key] = raw[key];
       });
 
-      for (var k in address) {
-        if (address.hasOwnProperty(k)) { userData.address = address; break; }
+      /*
+        Country is the field nobody asks for. A UK enquiry form collects a
+        name and a postcode and stops, so the set is one value short of
+        usable and the value it is short of is the same for every visitor
+        the site has.
+
+        Two things to be honest about. This is an INFERRED value, not one
+        the visitor gave — Google's customer-data policy describes
+        first-party data as information shared directly by the customer, and
+        a site-wide default is not that. And it only fires when no country
+        field was seen at all: a visitor who answered, in words the alias
+        table could not read, keeps their answer and the address is withheld
+        rather than relabelled.
+
+        Only the country is ever assumed. Guarding this on the rest of the
+        set being present would read as extra safety and be dead code — the
+        completeness test below already discards an address short of
+        anything, so stamping a country onto one that is going to be
+        dropped changes nothing.
+      */
+      if (ASSUME_DEFAULT_COUNTRY && !address.country && !raw.country_supplied) {
+        var assumed = normalise('country', DEFAULT_COUNTRY);
+        if (assumed) address.country = assumed;
       }
 
-      // Google needs at least an email, a phone, or a usable address.
+      /*
+        Google's address block is all or nothing: first name, last name,
+        postcode and country together, or it discards the whole thing and
+        reports "your enhanced conversions addresses are missing required
+        fields" in the diagnostics panel.
+
+        So a partial address is not a partial benefit — it is zero benefit
+        and a warning. Worse, it is hashed personal data pushed into a
+        page-global array for nothing, which is precisely what the rest of
+        this file works to avoid. Send the set or send none of it.
+      */
       var hasAddress = !!(address.sha256_first_name && address.sha256_last_name &&
                           address.postal_code && address.country);
+      if (hasAddress) userData.address = address;
       if (!userData.sha256_email_address && !userData.sha256_phone_number && !hasAddress) {
         log('no matchable identifier, dropping user_data');
         return null;
