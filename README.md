@@ -52,8 +52,8 @@ the form itself — Contact Form 7, Gravity Forms, HTML Forms, most WordPress fo
 `defaultPrevented` and threw the event away. Those are now reported. See `REPORT_AJAX_SUBMISSIONS`
 in the config block for the one trade-off that carries.
 
-**Install is one GTM Custom HTML tag.** Paste the file in, set two constants — a country code and
-`CONSENT_MODE` — and trigger on All Pages. Read "If you are on 1.3, upgrade" above as well: it
+**Install is one GTM Custom HTML tag.** Paste the file in, set three constants — a country code,
+`CONSENT_MODE`, and whether to assume that country on addresses — and trigger on All Pages. Read "If you are on 1.3, upgrade" above as well: it
 covers `CONSENT_MODE`, which did not exist when 1.2 shipped and which decides whether this collects
 anything at all.
 
@@ -170,11 +170,12 @@ One GTM tag. Five minutes.
 1. **Tags → New → Tag Configuration → Custom HTML.**
 2. Open the `html-forms` file in this repo, select **all of it**, and paste it into the HTML box.
    Include the `<script>` and `</script>` lines at the top and bottom.
-3. Near the top you will see a short config block. Change two values:
+3. Near the top you will see a short config block. Change three values:
 
    ```js
-   var DEFAULT_COUNTRY = 'GB';
-   var CONSENT_MODE    = 'cmp';
+   var DEFAULT_COUNTRY        = 'GB';    // where are most of this site's visitors?
+   var CONSENT_MODE           = 'cmp';   // does this site have a cookie banner?
+   var ASSUME_DEFAULT_COUNTRY = false;   // do enquiries come from one country?
    ```
 
    `DEFAULT_COUNTRY` is the country most of this site's visitors are in. It is the one that
@@ -183,6 +184,12 @@ One GTM tag. Five minutes.
    `CONSENT_MODE` is `'cmp'` if this site has a consent banner and `'none'` if it does not. Read
    the Consent section before setting `'none'`; it is a statement about the deployment and the
    script trusts you.
+
+   `ASSUME_DEFAULT_COUNTRY` is the one most sites need and nobody expects. Google discards an
+   address unless it has first name, last name, postcode **and** country together — and almost no
+   lead form asks for country. Set it to `true` and country is filled from `DEFAULT_COUNTRY`;
+   leave it `false` and most forms will send no address at all. Set it only where enquiries
+   genuinely come from one country.
 4. **Triggering → All Pages.**
 5. Name it something like `Form tracking` and **Save**.
 
