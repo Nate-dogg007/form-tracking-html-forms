@@ -639,19 +639,113 @@ console.log('\nconsent must fail closed, not open');
   }, { consent: 'none' });
   check('an explicit grant still collects', !!submissions[0]?.user_data);
 }
+/*
+  Regional Consent Mode. An earlier round asserted the opposite of this —
+  that a region-scoped deny "for somewhere else" must not zero user_data for
+  everyone — which is a real concern and was half the picture. The other half
+  is that the script has no idea whether "somewhere else" is where this
+  visitor actually is, so reading the global fallback instead leaked hashed
+  emails from people whose own regional default said no.
+
+  Neither guess has a safe direction, so it now reports neither.
+*/
+console.log('\nregion-scoped consent cannot be resolved in a browser');
 {
-  // Both reviewers found this independently: a region-scoped default for
-  // somewhere else must not zero user_data for everyone.
+  // The leak, as it was: this visitor may be in GB, where the default is
+  // denied. Reading the global fallback collected them anyway.
   const { submissions } = await run('/consent', 1, async (p) => {
-    await p.evaluate(() => {
-      window.dataLayer.push(['consent', 'default', { ad_user_data: 'granted' }]);
-      window.dataLayer.push(['consent', 'default', { ad_user_data: 'denied', region: ['ES'] }]);
-    });
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_user_data: 'denied', region: ['GB','ES'] }]);
+      window.dataLayer.push(['consent','default',{ ad_user_data: 'granted' }]);`);
     await p.click('button[type=submit]');
     await p.waitForTimeout(250);
   }, { consent: 'none' });
-  check('a region-scoped default elsewhere does not deny here',
-    !!submissions[0]?.user_data, JSON.stringify(submissions[0]));
+  check('a regional deny + global grant collects nothing',
+    !submissions[0]?.user_data, JSON.stringify(submissions[0]?.user_data));
+  check("and reports 'region_unresolved', not 'no_consent_signal'",
+    submissions[0]?.user_data_status === 'region_unresolved',
+    submissions[0]?.user_data_status);
+  check('and the conversion still fires', submissions.length === 1);
+}
+{
+  // The mirror. Under-collecting here is the honest cost of not guessing.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_user_data: 'granted', region: ['GB'] }]);
+      window.dataLayer.push(['consent','default',{ ad_user_data: 'denied' }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a regional grant + global deny also collects nothing',
+    !submissions[0]?.user_data && submissions[0]?.user_data_status === 'region_unresolved',
+    submissions[0]?.user_data_status);
+}
+{
+  // The escape hatch that matters commercially: anyone who answers the
+  // banner is pushed a global update, and that resolves it.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_user_data: 'denied', region: ['GB'] }]);
+      window.dataLayer.push(['consent','default',{ ad_user_data: 'granted' }]);
+      window.dataLayer.push(['consent','update',{ ad_user_data: 'granted' }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a global update still resolves it, regional defaults or not',
+    submissions[0]?.user_data_status === 'collected' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_user_data: 'granted', region: ['GB'] }]);
+      window.dataLayer.push(['consent','update',{ ad_user_data: 'denied' }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('and a global update denying still denies',
+    submissions[0]?.user_data_status === 'consent_denied' && !submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
+  // A region-scoped entry about a DIFFERENT consent type must not poison
+  // the read — otherwise almost every EEA site fails closed for no reason.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_storage: 'denied', region: ['GB'] }]);
+      window.dataLayer.push(['consent','default',{ ad_user_data: 'granted' }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('a regional entry not mentioning ad_user_data is ignored',
+    submissions[0]?.user_data_status === 'collected' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
+  // The declaration still governs, as it does for every other silence.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.dataLayer.push(['consent','default',
+        { ad_user_data: 'denied', region: ['GB'] }]);
+      window.dataLayer.push(['consent','default',{ ad_user_data: 'granted' }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none', consentMode: 'none' });
+  check("under CONSENT_MODE 'none' it collects and says 'collected_undeclared'",
+    submissions[0]?.user_data_status === 'collected_undeclared' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
+}
+{
+  // The documented way out for a site that genuinely uses regional defaults.
+  const { submissions } = await run('/consent', 1, async (p) => {
+    await p.evaluate(`window.formTrackingConsentFn = function () { return true; };
+      window.dataLayer.push(['consent','default',
+        { ad_user_data: 'denied', region: ['GB'] }]);`);
+    await p.click('button[type=submit]');
+    await p.waitForTimeout(250);
+  }, { consent: 'none' });
+  check('formTrackingConsentFn overrides the region problem entirely',
+    submissions[0]?.user_data_status === 'collected' && !!submissions[0]?.user_data,
+    submissions[0]?.user_data_status);
 }
 {
   const { submissions } = await run('/consent', 1, async (p) => {
