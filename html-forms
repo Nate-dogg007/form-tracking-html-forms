@@ -66,9 +66,13 @@
     no_crypto             SubtleCrypto missing, so not a secure context
     error                 hashing or assembly threw
 
-    `cmp_detected` is added alongside the two no-signal statuses, naming
-    the CMP found on the page when nothing readable said yes or no. With
-    no_consent_signal it names what to go and wire up; with
+    `cmp_detected` is added whenever no consent signal could be read and a
+    known CMP was nonetheless found on the page — so it can accompany any
+    status that follows from that state, not only the two no-signal ones
+    (a form with no matchable fields still reports no_fields, and still
+    says which CMP was sitting there silent).
+
+    With no_consent_signal it names what to go and wire up; with
     collected_undeclared it means the site declared 'none' and was wrong.
     Either way, treat it as a bug report about the install.
 

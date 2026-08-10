@@ -15,8 +15,10 @@ for a UK site with a banner and wrong for a US site with none — and there was 
 two apart, because both look like the same silence.
 
 **`REQUIRE_EXPLICIT_CONSENT` is now `CONSENT_MODE`.** Set it to `'cmp'` if the site has a consent
-banner, `'none'` if it does not. `'cmp'` is the default and matches 1.3's behaviour exactly, so a
-straight paste-over changes nothing. If you had set `REQUIRE_EXPLICIT_CONSENT = false`, you now
+banner, `'none'` if it does not. `'cmp'` is the default and leaves the collection decision exactly
+as 1.3 made it, so a straight paste-over collects the same things — the events now carry
+`user_data_status`, which 1.3 never emitted, but nothing about what is collected changes. If you
+had set `REQUIRE_EXPLICIT_CONSENT = false`, you now
 want `CONSENT_MODE = 'none'` — paste 1.4 over the tag without setting it and that site quietly
 stops collecting.
 
@@ -50,8 +52,10 @@ the form itself — Contact Form 7, Gravity Forms, HTML Forms, most WordPress fo
 `defaultPrevented` and threw the event away. Those are now reported. See `REPORT_AJAX_SUBMISSIONS`
 in the config block for the one trade-off that carries.
 
-**Install is one GTM Custom HTML tag.** Paste the file in, set one country code, trigger on All
-Pages. Nothing to toggle.
+**Install is one GTM Custom HTML tag.** Paste the file in, set two constants — a country code and
+`CONSENT_MODE` — and trigger on All Pages. Read "If you are on 1.3, upgrade" above as well: it
+covers `CONSENT_MODE`, which did not exist when 1.2 shipped and which decides whether this collects
+anything at all.
 
 This feeds **Google Ads enhanced conversions only**. Do not put the hashed fields into GA4 event
 parameters or custom dimensions: that is what
@@ -291,7 +295,10 @@ about ninety days late.
 | `no_crypto` | No SubtleCrypto, so not a secure context |
 | `error` | Hashing or assembly threw |
 
-`cmp_detected` appears alongside the two no-signal statuses, naming the CMP found on the page.
+`cmp_detected` appears whenever no consent signal could be read and a known CMP was found on the
+page anyway, naming it. It follows the *state*, not the status, so it can ride along with any
+status reachable from there — a form with no matchable fields still reports `no_fields`, and still
+tells you which CMP was sitting there silent.
 
 Worth watching, in rough order of how much they should bother you:
 
@@ -436,9 +443,11 @@ In the Tag Assistant window:
    `sha256_email_address` and an `address` block.
 3. Check the **Tags** tab shows `Google Ads - Lead conversion` fired.
 
-**If the event fires but `user_data` is empty**, consent is being read as denied. Open the browser
-console — the script logs one warning explaining exactly that. It fails closed, so no readable
-`ad_user_data` signal means no user data, deliberately.
+**If the event fires but `user_data` is empty**, do not guess — the event says why. Look at
+`user_data_status` in the same Variables tab. Consent is only one of the reasons it can be empty;
+the form's field names not matching is just as common, and looks identical from here. See
+[Knowing whether it worked](#knowing-whether-it-worked-user_data_status) for what each value means
+and what to do about it. The script also logs one console warning for the consent cases.
 
 ---
 
