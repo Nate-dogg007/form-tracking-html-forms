@@ -1,4 +1,16 @@
 <script>
+/* ─────────────────────────────────────────────────────────────────────
+   GENERATED FILE — DO NOT EDIT
+
+   Built from Nate-dogg007/form-tracking-core (private), v1.5.1.
+   Edits here are overwritten by the next release and reach no site.
+
+   To change behaviour: core/ for anything shared with the other four
+   plugins, adapters/html-forms/ for anything specific to this one.
+
+   Pasting this whole file into a GTM Custom HTML tag is still exactly
+   how it is installed. That has not changed and is not going to.
+   ───────────────────────────────────────────────────────────────────── */
 /*
   ░▒▓█ HTML Form Tracking → Google Ads Enhanced Conversions █▓▒░
   Author:  Nathan O'Connor
@@ -145,8 +157,8 @@
   // rather under-count than over-count.
   var REPORT_AJAX_SUBMISSIONS = true;
 
-  // Hard cap on how long a submission is held while hashing + tag firing
-  // complete. The form always submits, timeout or not.
+  // How long to give GTM to fire its tags before giving up on the
+  // callback. Only relevant when the form redirects on success.
   var MAX_DELAY_MS = 1200;
 
   // Log to console. Leave false in production.
@@ -162,8 +174,6 @@
   /* ════════════════════════════════════════════════════════════════════ */
 
 
-  // Dial codes for DEFAULT_COUNTRY. Numbers already in international format
-  // (+44…, 0044…) are used as-is regardless of what is listed here.
   var DIAL_CODES = {
     GB: '44',  US: '1',   CA: '1',   IE: '353', AU: '61',  NZ: '64',
     ZA: '27',  IN: '91',  DE: '49',  FR: '33',  ES: '34',  IT: '39',
@@ -314,9 +324,6 @@
   }
   STATE.installed = true;
 
-  // SubtleCrypto needs a secure context. Without it nothing can be hashed,
-  // and sending personal data unhashed is not an option — so the tag still
-  // reports submissions, just never with user_data attached.
   var CAN_HASH = !!(window.crypto && window.crypto.subtle);
   if (!CAN_HASH) log('SubtleCrypto unavailable (needs HTTPS) — user data disabled');
 
@@ -812,6 +819,45 @@
     }
     return form.querySelectorAll('input, select, textarea');
   }
+  /*
+    The name ladder, from design/escape-hatches.md:
+
+      data-form-name on the element or ANY ANCESTOR
+        -> the platform's own title
+          -> '<platform>_form_' + id
+            -> 'unnamed_form'
+
+    closest(), not getAttribute(), and that is the whole point of the function.
+    Measured on a live Ninja install: the <form> renders with no id and no class
+    inside a generated #nf-form-<id>-cont, so neither element is anywhere a
+    WordPress editor can put an attribute. A wrapper the site owner writes
+    themselves is the only override that exists there.
+
+    closest() starts at the element itself, so this is a strict superset of
+    reading the attribute off the form. No install that already sets it changes.
+
+    `attrs` is per-adapter rather than a constant. html-forms also honours the
+    deprecated data-title, and that must NOT be read on the other four: it is a
+    generic attribute themes and sliders use for tooltips, so reading it as a
+    form name would invent names on sites that never set one.
+
+    Nothing below the ladder is manufactured. No id from DOM position, from the
+    field set, or from a hash of the markup — those change when the page changes,
+    and a form_name that silently re-buckets in GA4 is worse than one that is
+    visibly absent. `unnamed_form` showing up in a report is the signal to go and
+    add the attribute.
+  */
+  function resolveFormName(el, attrs, ownTitle, fallback) {
+    try {
+      for (var i = 0; i < attrs.length; i++) {
+        var host = el && el.closest && el.closest('[' + attrs[i] + ']');
+        var v = host && host.getAttribute && host.getAttribute(attrs[i]);
+        if (v && v.trim()) return v.trim();
+      }
+    } catch (err) { log('could not resolve a form name', err); }
+    if (ownTitle && String(ownTitle).trim()) return String(ownTitle).trim();
+    return fallback;
+  }
 
   /*
     Deliberately no page path. Nothing here needs one, and GTM can read
@@ -825,11 +871,15 @@
     titles static.
   */
   function formDetails(form) {
+    var own = '';
+    try { own = form.getAttribute('name') || form.getAttribute('id') || ''; }
+    catch (err) { log('could not read a form name', err); }
     return {
       form_id:   form.getAttribute('id') || '',
-      form_name: form.getAttribute('data-title') ||
-                 form.getAttribute('name') ||
-                 form.getAttribute('id') || 'unnamed_form'
+      // data-title is the deprecated alias, read after data-form-name so that
+      // installs predating the rename keep working unchanged.
+      form_name: resolveFormName(form, ['data-form-name', 'data-title'], own,
+                                 'unnamed_form')
     };
   }
 
